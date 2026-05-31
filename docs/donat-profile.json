@@ -1,7 +1,7 @@
 {
   "_comment": "Graph model of Donat's technical knowledge. Agents: read at session start, use concept levels to calibrate explanations, traverse edges to find explanation anchors, update when Donat signals.",
   "version": "2.0",
-  "last_updated": "2026-05-31",
+  "last_updated": "2026-05-31 (playwright added)",
   "concepts": {
     "ruby":             { "label": "Ruby",                                                "level": 3 },
     "rails":            { "label": "Rails",                                               "level": 2, "note": "2026-05-31: conceptual, hasn't hand-coded" },
@@ -18,7 +18,8 @@
     "solid_queue":      { "label": "solid_queue (DB-backed job queue for Rails 8)",       "level": 0, "note": "2026-05-31: knows background_job concept; solid_queue internals unknown" },
     "sentry_dsn":       { "label": "Sentry DSN (error-tracking service connection key)",  "level": 0 },
     "rspec_matchers":   { "label": "RSpec matchers (test assertion syntax)",              "level": 0 },
-    "importmap":        { "label": "importmap (JS module loading without bundler)",       "level": 0 }
+    "importmap":        { "label": "importmap (JS module loading without bundler)",       "level": 0 },
+    "playwright":       { "label": "Playwright (browser automation / scraping)",          "level": 3, "wants_to_learn": false, "note": "2026-05-31: hands-on routine, wrote many scrapers" }
   },
   "edges": [
     { "from": "rails",          "to": "ruby",           "type": "requires" },
