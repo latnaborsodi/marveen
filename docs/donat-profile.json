@@ -1,48 +1,55 @@
 {
-  "_comment": "Machine-readable profile of what Donat knows and what needs explanation. Agents load this at session start via Read tool and update it when Donat signals ignorance or demonstrated knowledge.",
-  "version": "1.0",
+  "_comment": "Graph model of Donat's technical knowledge. Agents: read at session start, use concept levels to calibrate explanations, traverse edges to find explanation anchors, update when Donat signals.",
+  "version": "2.0",
   "last_updated": "2026-05-31",
-  "known": [
-    "Rails",
-    "Ruby",
-    "git",
-    "PR (pull request)",
-    "CI (continuous integration)",
-    "kanban",
-    "agent",
-    "REST API",
-    "JSON",
-    "HTTP",
-    "PostgreSQL alapok",
-    "migration (adatbázis-séma változtatás)",
-    "ActiveRecord",
-    "Gemfile",
-    "systemd",
-    "deploy",
-    "Telegram",
-    "VS Code",
-    "Sidekiq / background job fogalom",
-    "branch",
-    "commit",
-    "merge"
-  ],
-  "needs_explanation": [
-    "brakeman (statikus biztonsági kódscanner Ruby/Rails projektekhez)",
-    "solid_queue belső működése",
-    "Sentry DSN (hibagyűjtő szolgáltatás kapcsolati kulcsa)",
-    "RSpec matcher részletek",
-    "importmap (JS bundle-mentes module loading Rails-ben)",
-    "EnvironmentFile (systemd unit fájl direktíva: env változók betöltése fájlból)"
-  ],
-  "update_protocol": {
-    "when_donat_asks_mi_az_X": "Add to needs_explanation with a parenthetical explanation, then Edit this file",
-    "when_donat_uses_term_correctly_without_asking": "Move to known list, then Edit this file",
-    "format": "needs_explanation entries: 'term (one-sentence explanation in Hungarian)'"
+  "concepts": {
+    "ruby":             { "label": "Ruby",                                                "level": 3 },
+    "rails":            { "label": "Rails",                                               "level": 2, "note": "2026-05-31: conceptual, hasn't hand-coded" },
+    "git":              { "label": "git",                                                 "level": 2, "wants_to_learn": true },
+    "deploy":           { "label": "deploy",                                              "level": 2 },
+    "background_job":   { "label": "background job (async task outside HTTP request)",    "level": 2 },
+    "postgresql":       { "label": "PostgreSQL (database)",                               "level": 2 },
+    "pr":               { "label": "PR (pull request)",                                   "level": 1, "note": "2026-05-30: first encountered" },
+    "ci":               { "label": "CI (continuous integration)",                         "level": 1, "note": "2026-05-30: first encountered" },
+    "sha":              { "label": "commit SHA (hash that identifies a commit)",          "level": 1, "note": "2026-05-30: first learned" },
+    "crlf":             { "label": "CRLF (Windows line endings vs Unix LF)",              "level": 1, "note": "2026-05-30: first learned" },
+    "brakeman":         { "label": "brakeman (static security scanner for Rails)",        "level": 1, "note": "2026-05-30: first learned" },
+    "systemd":          { "label": "systemd (Linux service manager)",                     "level": 0 },
+    "solid_queue":      { "label": "solid_queue (DB-backed job queue for Rails 8)",       "level": 0, "note": "2026-05-31: knows background_job concept; solid_queue internals unknown" },
+    "sentry_dsn":       { "label": "Sentry DSN (error-tracking service connection key)",  "level": 0 },
+    "rspec_matchers":   { "label": "RSpec matchers (test assertion syntax)",              "level": 0 },
+    "importmap":        { "label": "importmap (JS module loading without bundler)",       "level": 0 }
   },
-  "communication_rules": {
-    "language": "Hungarian",
-    "jargon_policy": "Explain in parentheses on first use per session if term is in needs_explanation",
-    "response_length": "short",
-    "forbidden": ["em dash", "AI clichés (Természetesen!, Remek kérdés!, Szívesen segítek)", "excessive apologies"]
+  "edges": [
+    { "from": "rails",          "to": "ruby",           "type": "requires" },
+    { "from": "rails",          "to": "git",            "type": "requires" },
+    { "from": "pr",             "to": "git",            "type": "requires" },
+    { "from": "ci",             "to": "pr",             "type": "related" },
+    { "from": "ci",             "to": "git",            "type": "requires" },
+    { "from": "sha",            "to": "git",            "type": "kind_of" },
+    { "from": "crlf",           "to": "git",            "type": "related" },
+    { "from": "deploy",         "to": "git",            "type": "requires" },
+    { "from": "deploy",         "to": "systemd",        "type": "requires" },
+    { "from": "brakeman",       "to": "ci",             "type": "related" },
+    { "from": "solid_queue",    "to": "rails",          "type": "builds_on" },
+    { "from": "solid_queue",    "to": "background_job", "type": "kind_of" },
+    { "from": "solid_queue",    "to": "postgresql",     "type": "requires" },
+    { "from": "sentry_dsn",     "to": "deploy",         "type": "related" },
+    { "from": "rspec_matchers", "to": "rails",          "type": "builds_on" },
+    { "from": "importmap",      "to": "rails",          "type": "builds_on" }
+  ],
+  "agent_rules": {
+    "level_0": "Full explanation required. Follow edges to find the nearest level-2/3 neighbor and anchor the explanation there. Example: solid_queue (level 0) -> background_job (level 2, known): 'solid_queue olyan mint egy background job rendszer (amit ismersz), csak Rails 8-ban PostgreSQL-ben tárolja a sorba állt feladatokat Redis helyett.'",
+    "level_1": "Brief parenthetical on first use per session. One clause, not a sentence.",
+    "level_2": "Skip basics. Explain depth, internals, and edge cases only when directly relevant.",
+    "level_3": "No explanation needed.",
+    "wants_to_learn_true": "At level 2-3, proactively offer to deepen when a natural moment arises. Don't force it every message.",
+    "unknown_concept": "If not in concepts dict, treat as level 0 and add after the session.",
+    "update_protocol": {
+      "mi_az_X": "Set level to 0 (or 1 if partial understanding likely); add note: 'YYYY-MM-DD: asked what X is — [one-line context]'; Edit file.",
+      "ertem_or_uses_correctly_without_asking": "level = min(level + 1, 3); Edit file.",
+      "nem_ertem": "level = 0; add note: 'YYYY-MM-DD: did not understand after explanation — [context]'; Edit file.",
+      "new_concept_encountered": "Add to concepts with level 0 (or calibrated from context). Add edge if connected to existing concept. Edit file."
+    }
   }
 }
