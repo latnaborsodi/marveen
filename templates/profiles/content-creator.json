@@ -1,0 +1,40 @@
+{
+  "id": "content-creator",
+  "label": "Content Creator",
+  "description": "Tour content generation: Wikimedia/Google API lookups, tour JSON writing to own workdir and tourguide output directory. Localhost inter-agent API (localhost:3420) allowed for escalation to Buddha (jezus). Destructive or outbound-messaging operations are not in the allow list — they trigger a permission prompt, which the agent must escalate to Buddha via inter-agent message.",
+  "permissionMode": "strict",
+  "filesystem": {
+    "allow": [
+      "Read(${AGENT_DIR}/**)",
+      "Write(${AGENT_DIR}/**)",
+      "Edit(${AGENT_DIR}/**)",
+      "Read(/mnt/d/tourguide/public/generated_tours/**)",
+      "Write(/mnt/d/tourguide/public/generated_tours/**)",
+      "Read(/mnt/d/tourguide/docs/**)",
+      "Read(/mnt/d/tourguide/app/**)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(wc:*)",
+      "Bash(date:*)",
+      "Bash(curl -s -X POST http://localhost:3420/:*)",
+      "Bash(curl -s -H:*)",
+      "WebFetch(*)",
+      "WebSearch(*)"
+    ],
+    "deny": [
+      "Read(${HOME}/.ssh/**)",
+      "Read(${HOME}/.aws/**)",
+      "Read(${HOME}/.gnupg/**)",
+      "Read(${HOME}/.env)",
+      "Read(**/.env)",
+      "Bash(sudo:*)",
+      "Bash(rm:*)",
+      "Bash(git push:*)",
+      "Bash(git branch -D:*)",
+      "Bash(curl -X POST https://:*)",
+      "Bash(curl -s -X POST https://:*)"
+    ]
+  }
+}
