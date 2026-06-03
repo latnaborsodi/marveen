@@ -20,8 +20,9 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { logger } from '../logger.js'
-import { PROJECT_ROOT } from '../config.js'
+import { PROJECT_ROOT, TELEGRAM_BOT_TOKEN } from '../config.js'
 import { readEnvFile } from '../env.js'
+import { notifyChannel } from '../notify.js'
 
 // Mirrors KEEPALIVE_RESPAWN_GRACE_MS from channel-monitor.ts (15 min).
 // Not imported directly to avoid a circular module dependency: channel-monitor.ts
@@ -289,8 +290,30 @@ function spawnProber(): void {
   }
 }
 
+/**
+ * Validate the bot token against the Telegram Bot API before a respawn.
+ * Exported for unit testing (callers pass the token explicitly).
+ *
+ * Returns:
+ *   { ok: true }                    — token valid, Telegram reachable
+ *   { ok: false, statusCode: 401 }  — token invalid or revoked
+ *   { ok: false, statusCode: 403 }  — token forbidden
+ *   { ok: false }                   — Telegram API down (5xx) or network error
+ */
+export async function checkBotTokenHealth(token: string): Promise<{ ok: boolean; statusCode?: number }> {
+  if (!token) return { ok: true }  // no token configured — not our concern here
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, {
+      signal: AbortSignal.timeout(8000),
+    })
+    return { ok: res.ok, statusCode: res.status }
+  } catch {
+    return { ok: false }  // network error or timeout
+  }
+}
+
 // N5: renamed doInboundProbeCheck → checkInboundProbeDeafness (match check* convention)
-function checkInboundProbeDeafness(probeTimeoutMs: number): void {
+async function checkInboundProbeDeafness(probeTimeoutMs: number): Promise<void> {
   // Session file absent — safe no-op.
   if (!existsSync(SESSION_FILE)) return
 
@@ -311,6 +334,20 @@ function checkInboundProbeDeafness(probeTimeoutMs: number): void {
   })
 
   if (!needsRespawn) return
+
+  // Tier 2 back-off guard: before respawning, verify the Telegram API itself is
+  // reachable and the bot token is valid. A futile respawn (Telegram down or
+  // token revoked) wastes a hard-restart and masks the real cause.
+  const health = await checkBotTokenHealth(TELEGRAM_BOT_TOKEN)
+  if (!health.ok) {
+    if (health.statusCode === 401 || health.statusCode === 403) {
+      logger.error({ statusCode: health.statusCode }, 'Bot token invalid or revoked -- skipping respawn')
+      notifyChannel('🚨 Telegram bot token ÉRVÉNYTELEN (401/403). Respawn nem segít -- új tokent kell beállítani.').catch(() => {})
+    } else {
+      logger.warn({ statusCode: health.statusCode }, 'Telegram API unreachable -- deferring respawn to next tick')
+    }
+    return
+  }
 
   // Lazy import to avoid circular dependency at module load time.
   // B2: also import lastMainRespawnAt to enforce cross-path grace (an inbound-probe
@@ -376,10 +413,12 @@ export function startInboundProber(): void {
   setInterval(() => {
     try {
       spawnProber()
-      checkInboundProbeDeafness(probeIntervalMs * PROBE_TIMEOUT_MULTIPLIER)
     } catch (err) {
-      logger.error({ err }, 'Inbound probe check tick failed')
+      logger.error({ err }, 'Inbound probe spawnProber failed in tick')
     }
+    checkInboundProbeDeafness(probeIntervalMs * PROBE_TIMEOUT_MULTIPLIER).catch((err) => {
+      logger.error({ err }, 'Inbound probe check tick failed')
+    })
   }, probeIntervalMs)
 
   logger.info({ probeIntervalMs }, 'Inbound prober started')

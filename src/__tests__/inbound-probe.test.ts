@@ -1,8 +1,8 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest'
 import { mkdtempSync, writeFileSync, mkdirSync, rmdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { shouldTriggerDeafnessRespawn, readLastIngestionTimestamp } from '../web/inbound-probe.js'
+import { shouldTriggerDeafnessRespawn, readLastIngestionTimestamp, checkBotTokenHealth } from '../web/inbound-probe.js'
 
 // ---------------------------------------------------------------------------
 // AC coverage map (channel-watchdog-prompt.md D3 + wolf-swarm-trial.md #3)
@@ -199,5 +199,75 @@ describe('readLastIngestionTimestamp', () => {
     // The tail window starts at the last 256 KB — the earlyLine is NOT in it.
     // The function must return null (the line is beyond the tail window).
     expect(readLastIngestionTimestamp(dir)).toBe(null)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// checkBotTokenHealth — Tier 2 back-off guard
+//
+// These tests cover the guard that suppresses futile respawns when the
+// Telegram API is down or the bot token is revoked.
+// ---------------------------------------------------------------------------
+describe('checkBotTokenHealth', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('returns { ok: true } when no token is configured (empty string)', async () => {
+    // No fetch call should be made — nothing to validate.
+    const result = await checkBotTokenHealth('')
+    expect(result).toEqual({ ok: true })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+
+  it('returns { ok: true } when getMe responds HTTP 200', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: true, status: 200 } as Response)
+    const result = await checkBotTokenHealth('bot123:TOKEN')
+    expect(result).toEqual({ ok: true, statusCode: 200 })
+  })
+
+  it('returns { ok: false, statusCode: 401 } for revoked token', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: false, status: 401 } as Response)
+    const result = await checkBotTokenHealth('bot123:REVOKED')
+    expect(result).toEqual({ ok: false, statusCode: 401 })
+  })
+
+  it('returns { ok: false, statusCode: 403 } for forbidden token', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: false, status: 403 } as Response)
+    const result = await checkBotTokenHealth('bot123:FORBIDDEN')
+    expect(result).toEqual({ ok: false, statusCode: 403 })
+  })
+
+  it('returns { ok: false } (no statusCode) on network error', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('ECONNREFUSED'))
+    const result = await checkBotTokenHealth('bot123:TOKEN')
+    expect(result).toEqual({ ok: false })
+    expect(result.statusCode).toBeUndefined()
+  })
+
+  it('returns { ok: false } (no statusCode) on timeout (AbortError)', async () => {
+    const abortError = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })
+    vi.mocked(fetch).mockRejectedValueOnce(abortError)
+    const result = await checkBotTokenHealth('bot123:TOKEN')
+    expect(result).toEqual({ ok: false })
+  })
+
+  it('returns { ok: false } on Telegram 5xx (server error)', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: false, status: 503 } as Response)
+    const result = await checkBotTokenHealth('bot123:TOKEN')
+    expect(result).toEqual({ ok: false, statusCode: 503 })
+  })
+
+  it('calls the correct Telegram getMe URL', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: true, status: 200 } as Response)
+    await checkBotTokenHealth('bot42:MYTOKEN')
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      'https://api.telegram.org/botbot42:MYTOKEN/getMe',
+      expect.objectContaining({ signal: expect.anything() }),
+    )
   })
 })
