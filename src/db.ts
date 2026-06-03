@@ -1011,6 +1011,7 @@ export interface HeartbeatKanbanSummary {
   urgent: KanbanCard[]
   in_progress: KanbanCard[]
   waiting: KanbanCard[]
+  recentlyCreated: KanbanCard[]
 }
 
 export function getHeartbeatKanbanSummary(): HeartbeatKanbanSummary {
@@ -1023,7 +1024,11 @@ export function getHeartbeatKanbanSummary(): HeartbeatKanbanSummary {
   const waiting = db
     .prepare("SELECT * FROM kanban_cards WHERE archived_at IS NULL AND status = 'waiting'")
     .all() as KanbanCard[]
-  return { urgent, in_progress, waiting }
+  const recentlyCreatedSince = Math.floor(Date.now() / 1000) - 65 * 60
+  const recentlyCreated = db
+    .prepare("SELECT * FROM kanban_cards WHERE archived_at IS NULL AND status != 'done' AND created_at >= ?")
+    .all(recentlyCreatedSince) as KanbanCard[]
+  return { urgent, in_progress, waiting, recentlyCreated }
 }
 
 // --- Agent Messages ---
