@@ -19,7 +19,10 @@
     "sentry_dsn":       { "label": "Sentry DSN (error-tracking service connection key)",  "level": 0 },
     "rspec_matchers":   { "label": "RSpec matchers (test assertion syntax)",              "level": 0 },
     "importmap":        { "label": "importmap (JS module loading without bundler)",       "level": 0 },
-    "playwright":       { "label": "Playwright (browser automation / scraping)",          "level": 3, "wants_to_learn": false, "note": "2026-05-31: hands-on routine, wrote many scrapers" }
+    "playwright":       { "label": "Playwright (browser automation / scraping)",          "level": 3, "wants_to_learn": false, "note": "2026-05-31: hands-on routine, wrote many scrapers" },
+    "pundit":           { "label": "Pundit (Rails authorization gem, policy-based)",      "level": 0, "note": "2026-05-31: asked what it is — surfaced in permit(:role) policy discussion" },
+    "ux":               { "label": "UX (user experience, használati élmény)",             "level": 1, "note": "2026-05-31: asked for formal definition after contextual use in option A/B comparison" },
+    "ui":               { "label": "UI (user interface, felhasználói felület)",           "level": 1, "note": "2026-05-31: asked UX vs UI distinction; grasped by analogy" }
   },
   "edges": [
     { "from": "rails",          "to": "ruby",           "type": "requires" },
