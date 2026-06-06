@@ -54,3 +54,4 @@ claudeclaw.log
 backups/
 .external-ops-last-run
 store.bak-*/
+**/__pycache__/
