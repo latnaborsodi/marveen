@@ -48,3 +48,5 @@ claudeclaw.log
 
 # Local backup archives from scripts/backup.sh
 backups/
+.external-ops-last-run
+store.bak-*/
