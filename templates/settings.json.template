@@ -27,6 +27,18 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/tool-log-capture.py",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
