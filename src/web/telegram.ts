@@ -24,6 +24,24 @@ export function readAgentDiscordConfig(name: string): { hasDiscord: boolean; bot
   return { hasDiscord: true }
 }
 
+// Google Chat is creds-based (no bot token): a configured agent has
+// GOOGLECHAT_PROJECT_ID in its channel .env (see channel-provider readChannelToken).
+export function readAgentGooglechatConfig(name: string): { hasGooglechat: boolean } {
+  const envPath = join(agentDir(name), '.claude', 'channels', 'googlechat', '.env')
+  if (!existsSync(envPath)) return { hasGooglechat: false }
+  const m = readFileOr(envPath, '').match(/GOOGLECHAT_PROJECT_ID=(.+)/)
+  return { hasGooglechat: !!m?.[1]?.trim() }
+}
+
+export function readAgentTeamsConfig(name: string): { hasTeams: boolean } {
+  // Teams has no single bot token; TEAMS_BOT_APP_ID standing in the .env signals
+  // the channel is configured (mirrors readChannelToken's teams branch).
+  const envPath = join(agentDir(name), '.claude', 'channels', 'teams', '.env')
+  if (!existsSync(envPath)) return { hasTeams: false }
+  const m = readFileOr(envPath, '').match(/TEAMS_BOT_APP_ID=(.+)/)
+  return { hasTeams: !!m?.[1]?.trim() }
+}
+
 // Marveen's Telegram channel lives under the global ~/.claude path, not
 // under agents/marveen, because the main agent reuses the system Claude
 // Code channel install. Read it the same way the plugin does.
@@ -47,6 +65,20 @@ export function readMarveenDiscordConfig(): { hasDiscord: boolean } {
   if (!existsSync(envPath)) return { hasDiscord: false }
   const tokenMatch = readFileOr(envPath, '').match(/DISCORD_BOT_TOKEN=(.+)/)
   return { hasDiscord: !!tokenMatch?.[1]?.trim() }
+}
+
+export function readMarveenGooglechatConfig(): { hasGooglechat: boolean } {
+  const envPath = join(homedir(), '.claude', 'channels', 'googlechat', '.env')
+  if (!existsSync(envPath)) return { hasGooglechat: false }
+  const m = readFileOr(envPath, '').match(/GOOGLECHAT_PROJECT_ID=(.+)/)
+  return { hasGooglechat: !!m?.[1]?.trim() }
+}
+
+export function readMarveenTeamsConfig(): { hasTeams: boolean } {
+  const envPath = join(homedir(), '.claude', 'channels', 'teams', '.env')
+  if (!existsSync(envPath)) return { hasTeams: false }
+  const m = readFileOr(envPath, '').match(/TEAMS_BOT_APP_ID=(.+)/)
+  return { hasTeams: !!m?.[1]?.trim() }
 }
 
 export function readMarveenSlackConfig(): { hasSlack: boolean } {

@@ -40,6 +40,8 @@ SESSION="${MAIN_AGENT_ID:-marveen}-channels"
 # Resolve plugin ID from provider
 case "$CHANNEL_PROVIDER" in
   slack)    PLUGIN_ID="slack-channel@marveen-marketplace" ;;
+  whatsapp) PLUGIN_ID="whatsapp@marveen-marketplace" ;;
+  teams)    PLUGIN_ID="teams@marveen-marketplace" ;;
   discord)  PLUGIN_ID="discord@claude-plugins-official" ;;
   *)        PLUGIN_ID="telegram@claude-plugins-official" ;;
 esac
@@ -84,10 +86,44 @@ export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HO
 # documented sandbox escape hatch. Harmless for non-root (guarded by uid check).
 [ "$(id -u)" = "0" ] && export IS_SANDBOX=1
 
+# Disable Claude Code's "Prompt Suggestions" (the grayed-out/DIM suggested command
+# shown in the input box, picked from git history / conversation). For headless
+# agent sessions it is pure noise AND it caused a false-positive incident: the
+# stuck-input recovery read the dim suggestion as a "parked input" and escalated a
+# phantom to the operator (2026-06-30, "Köszi a halakat."). Killing it at the
+# source removes the phantom entirely. Inherited by every sub-agent via the tmux
+# global env set below.
+export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
+
 CLAUDE="$(command -v claude)"
 TMUX="$(command -v tmux)"
 [ -z "$CLAUDE" ] && echo "ERROR: claude not found on PATH" >&2 && exit 1
 [ -z "$TMUX" ]   && echo "ERROR: tmux not found on PATH" >&2 && exit 1
+
+# MCP startup-batch tuning for the MAIN session (2026-06-26).
+#
+# The --channels telegram plugin registers as a stdio MCP server. Claude Code
+# connects stdio MCP servers in batches of MCP_SERVER_CONNECTION_BATCH_SIZE
+# (default 3) and, by default, blocks on each connection. The main session runs
+# the MOST MCP servers of any agent (filesystem + playwright + chrome + the
+# claude.ai Gmail/Calendar/Drive connectors + the channel plugin), so the slow
+# remote connectors starve the telegram plugin out of the startup batch / push
+# it past MCP_TIMEOUT -- it never registers, no poller spawns, and the main bot
+# goes silent (observed 2026-06-26: ~2h outage, auto-recovery exhausted).
+#
+# startAgentProcess already sets these for every sub-agent (which is why their
+# channels come up); channels.sh did NOT, so the main session never got the
+# mitigation. Set them inline on the launch command -- the tmux SERVER predates
+# this script and does not inherit its environment, so exporting here alone
+# would not reach the new claude. Mirrors the sub-agent launch.
+#
+# CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false also added here: the sub-agent spawn
+# (startAgentProcess) sets it to suppress the DIM ghost-text autocomplete, but
+# the MAIN channels session never got it -- so a dim ghost in the main box was
+# the one place the pane-scrape recovery could still misread it (the v1.15.0
+# dim-strip catches it on the recovery side, but killing it at the SOURCE on MAIN
+# too closes the gap end-to-end). Parity with the sub-agent launch.
+MCP_BATCH_ENV="export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false MCP_SERVER_CONNECTION_BATCH_SIZE=10 MCP_CONNECTION_NONBLOCKING=1 MCP_TIMEOUT=60000 && "
 
 # Read the main agent's default model from .claude/settings.json so we can
 # pass --model explicitly. Without --model claude-code falls back to its
@@ -115,6 +151,8 @@ $TMUX kill-session -t "$SESSION" 2>/dev/null
 MAIN_CHAN_DIR="$INSTALL_DIR/.claude/channels/$CHANNEL_PROVIDER"
 case "$CHANNEL_PROVIDER" in
   slack)    STATE_ENV_VAR="SLACK_STATE_DIR" ;;
+  whatsapp) STATE_ENV_VAR="WHATSAPP_STATE_DIR" ;;
+  teams)    STATE_ENV_VAR="TEAMS_STATE_DIR" ;;
   discord)  STATE_ENV_VAR="DISCORD_STATE_DIR" ;;
   *)        STATE_ENV_VAR="TELEGRAM_STATE_DIR" ;;
 esac
@@ -125,6 +163,33 @@ if [ -n "$ORPHAN_PIDS" ]; then
   /bin/sleep 0.3
   # shellcheck disable=SC2086
   /bin/kill -KILL $ORPHAN_PIDS 2>/dev/null || true
+fi
+
+# Second reap pass for plugin builds that DON'T set *_STATE_DIR in the poller
+# env (e.g. telegram@0.0.1). Those pollers carry CLAUDE_PLUGIN_ROOT=.../<provider>
+# instead, so the STATE_DIR grep above never matches and orphans accumulate
+# across restarts -> multiple getUpdates long-polls -> 409 Conflict -> the bot
+# goes silent/flaky.
+#
+# Scope to THIS (main) agent only. The tmux server is SHARED across the fleet,
+# and every sub-agent runs its OWN provider poller out of
+# $INSTALL_DIR/agents/<name>/. Those processes carry that agent dir in their
+# environment; the main agent's pollers do not. CLAUDE_PLUGIN_ROOT points at the
+# shared user-level plugin cache for every agent, so it cannot tell main from
+# sub on its own -- without the agents/ exclusion this pass SIGKILLs every live
+# sub-agent poller on a main restart (they would only recover on each
+# sub-agent's own next restart). A main orphan from an old build has no agent
+# dir, so it is still reaped. index() is a literal (non-regex) substring test so
+# an install path with regex metacharacters can't break the exclusion. The var
+# is named `subdir` (not `sub`) because `sub` is a reserved awk function name and
+# BSD/macOS awk syntax-errors on it.
+ORPHAN_PIDS2="$(/bin/ps eww -e 2>/dev/null | awk -v needle="CLAUDE_PLUGIN_ROOT=" -v prov="/${CHANNEL_PROVIDER}" -v subdir="${INSTALL_DIR}/agents/" '$0 ~ needle && $0 ~ prov && index($0, subdir) == 0 { print $1 }')"
+if [ -n "$ORPHAN_PIDS2" ]; then
+  # shellcheck disable=SC2086
+  /bin/kill -TERM $ORPHAN_PIDS2 2>/dev/null || true
+  /bin/sleep 0.3
+  # shellcheck disable=SC2086
+  /bin/kill -KILL $ORPHAN_PIDS2 2>/dev/null || true
 fi
 
 # P1 FIX: put the Claude auth token into the tmux SERVER global env BEFORE
@@ -143,6 +208,8 @@ fi
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   $TMUX set-environment -g ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY" 2>/dev/null || true
 fi
+# Propagate the prompt-suggestion disable to every sub-agent tmux session.
+$TMUX set-environment -g CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION false 2>/dev/null || true
 
 # Hybrid channel-coordinator model: the native plugin stays the PRIMARY inbound
 # path (it always polls getUpdates here -- never outbound-only). The standalone
@@ -156,8 +223,16 @@ fi
 # the cwd-based project dir may contain the user's own CLI sessions, and
 # resuming one of those loses the --channels activation state, causing
 # "Channel notifications skipped: server not in --channels list" errors.
+#
+# Idempotent launch: the service runs KillMode=process so a `systemctl stop`
+# no longer cgroup-kills the SHARED tmux server (which would tear down every
+# sibling agent session on this host -- the 2026-06-26 fleet-wide outage). The
+# trade-off is that a prior "$SESSION" can survive into this relaunch, so kill
+# just THIS session first -- never the server, never another agent's session --
+# otherwise new-session below fails with "duplicate session".
+$TMUX kill-session -t "$SESSION" 2>/dev/null || true
 $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
-  "$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}"
+  "${MCP_BATCH_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}"
 
 # Session startup guard: a Claude Code first-run dialogusait auto-accept-eljuk
 # kulonben a headless session orokre parkolna a prompton es a Telegram plugin
@@ -167,10 +242,42 @@ $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
 #  - "Do you trust the files in this folder?" / "trust" prompts (Y Enter)
 #  - "Welcome to Claude Code" / kezdo vezetes (Enter a folytatashoz)
 # 12 sec timeout ket retry-jal, mert WSL/tmux paint slow lehet first-run-on.
+#
+# EPERM fallback (Claude Code 2.1.183+ regression): launching --channels in a
+# trusted project directory throws EPERM before any dialog appears. Detected
+# below; one auto-restart from /tmp where the trust dialog fires instead.
+_eperm_restarted=0
 for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
   sleep 1
   pane=$($TMUX capture-pane -t "$SESSION" -p 2>/dev/null || true)
   case "$pane" in
+    *"EPERM"*|*"Operation not permitted"*|*"operation not permitted"*)
+      if [ "$_eperm_restarted" = "0" ]; then
+        _eperm_restarted=1
+        $TMUX kill-session -t "$SESSION" 2>/dev/null
+        _CHANNELS_STARTDIR="$(mktemp -d /tmp/marveen-channels-XXXXXX)"
+        # Carry the project CLAUDE.md into the fallback cwd so the session keeps
+        # Marveen's instructions/personality instead of running as a generic,
+        # context-less assistant (the biggest degradation of the /tmp fallback).
+        # Best-effort: a symlink failure degrades to the prior behaviour and
+        # never blocks startup. The trust dialog for the fresh /tmp path still
+        # fires and is handled by the guard below; EPERM is keyed on the
+        # registered project path, not on file presence, so seeding CLAUDE.md
+        # does not re-trigger it.
+        #
+        # NOTE: the project-scoped MCP servers (gmail/calendar) are NOT restored
+        # here. Claude Code keys those by project PATH in ~/.claude.json, not in
+        # the project .mcp.json, so a random /tmp path has no entry and symlinking
+        # files cannot bring them back. Restoring them needs a separate, more
+        # invasive change (a stable fallback dir + a seeded ~/.claude.json project
+        # entry); see the PR description / card 7EB18437.
+        [ -e "$INSTALL_DIR/CLAUDE.md" ] && ln -sf "$INSTALL_DIR/CLAUDE.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
+        $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
+          "${MCP_BATCH_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}"
+        unset _CHANNELS_STARTDIR
+      fi
+      continue
+      ;;
     *"Bypass Permissions mode"*"Yes, I accept"*)
       $TMUX send-keys -t "$SESSION" "2" Enter
       sleep 1
@@ -191,6 +298,7 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
       ;;
   esac
 done
+unset _eperm_restarted
 
 # Set agent name once the session is ready. (/remote-control dropped: the operator no
 # longer uses Remote Control.)
@@ -337,6 +445,17 @@ while $TMUX has-session -t "$SESSION" 2>/dev/null; do
     fi
   fi
   unset _bot_pid
+  # Fallback for plugin builds that never write bot.pid (e.g. telegram@0.0.1):
+  # treat a running plugin poller as alive. The poller is a bun process whose
+  # env CLAUDE_PLUGIN_ROOT points at the <provider> plugin dir. `ps eww -e`
+  # surfaces each process environment on macOS BSD ps (same technique the
+  # orphan-reaper above uses). Without this the watchdog false-restarts every
+  # ~10 min on plugin versions that don't emit a bot.pid.
+  if [ "$_plugin_alive" != "true" ]; then
+    if /bin/ps eww -e 2>/dev/null | grep -qE "CLAUDE_PLUGIN_ROOT=[^ ]*/${CHANNEL_PROVIDER}(/|@| |$)"; then
+      _plugin_alive=true
+    fi
+  fi
 
   if [ "$_plugin_alive" = "true" ]; then
     PLUGIN_SEEN_ONCE=true

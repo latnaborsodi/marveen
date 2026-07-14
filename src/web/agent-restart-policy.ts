@@ -25,6 +25,39 @@ export interface AgentRestartDecisionInput {
   // After the watchdog restarts an agent, give the new process at least this
   // long to come up before considering another restart.
   restartGraceMs: number
+  // Consecutive watchdog restarts that did NOT bring the plugin back up. Each
+  // failure doubles the effective restart grace (exponential back-off), so a
+  // perpetually-failing plugin (e.g. a broken third-party channel plugin that
+  // crashes on every launch) is retried ever less often instead of churning at
+  // the fixed grace forever -- which restarts the WHOLE agent every few minutes
+  // and renders it unusable. Reset to 0 by the caller once the plugin recovers.
+  // 0 / omitted preserves the original fixed-grace behaviour.
+  consecutiveFailures?: number
+  // Upper bound on the backed-off restart grace, so the watchdog still retries a
+  // long-down plugin occasionally (it may recover after an external fix) rather
+  // than backing off unboundedly. Omitted = no cap beyond the exponent.
+  maxRestartGraceMs?: number
+}
+
+// The restart grace after applying exponential back-off for repeated failed
+// restarts. Each consecutive failure doubles the base grace, capped (when a cap
+// is given) so retries continue at a bounded floor frequency. Exported for unit
+// tests and so the caller can log the effective interval.
+export function effectiveRestartGraceMs(
+  restartGraceMs: number,
+  consecutiveFailures: number,
+  maxRestartGraceMs?: number,
+): number {
+  const failures = Number.isFinite(consecutiveFailures) && consecutiveFailures > 0
+    ? Math.floor(consecutiveFailures)
+    : 0
+  // Cap the exponent well below the point where 2^n overflows Number range.
+  const exp = Math.min(failures, 30)
+  let grace = restartGraceMs * 2 ** exp
+  if (maxRestartGraceMs != null && Number.isFinite(maxRestartGraceMs)) {
+    grace = Math.min(grace, maxRestartGraceMs)
+  }
+  return grace
 }
 
 // Returns true only when a down-reporting agent should actually be restarted.
@@ -35,9 +68,49 @@ export function shouldAutoRestartDownAgent(input: AgentRestartDecisionInput): bo
   if (!Number.isFinite(processAgeMs) || processAgeMs < 0) return false
   // Freshly started: the channel plugin may still be spawning.
   if (processAgeMs < startupGraceMs) return false
-  // Recently restarted by the watchdog: give the new process time to come up.
-  if (msSinceLastRestart !== null && msSinceLastRestart < restartGraceMs) return false
+  // Recently restarted by the watchdog: give the new process time to come up,
+  // backed off exponentially for repeated failed restarts so a plugin that can
+  // never come up is not restarted on a fixed short cadence forever.
+  const grace = effectiveRestartGraceMs(restartGraceMs, input.consecutiveFailures ?? 0, input.maxRestartGraceMs)
+  if (msSinceLastRestart !== null && msSinceLastRestart < grace) return false
   return true
+}
+
+export type DownAgentAction = 'restart' | 'alert' | 'skip'
+
+// Hard cap on consecutive watchdog restarts that never bring the plugin back
+// up. The exponential back-off above only SLOWS the churn; on its own a plugin
+// that no restart can fix -- e.g. the claude-side channel MCP wedged after a
+// respawn-pane, or an auth/token fault the watchdog cannot repair -- is
+// hard-restarted forever. Every sub-agent restart is a FRESH session, so the
+// agent loses all of its working context on each cycle (observed: a sub-agent
+// hard-restarted ~10x/hour, re-running /name every time). After this many
+// consecutive failed attempts the watchdog stops restarting and alerts the
+// operator instead, turning a silent infinite loop into one actionable ping.
+export const AGENT_MAX_RESTART_ATTEMPTS = 5
+
+// Decide what to do about a sub-agent whose channel plugin is observed down.
+// Wraps shouldAutoRestartDownAgent with a consecutive-failure cap so the
+// watchdog escalates to a human instead of churning the session indefinitely:
+//   'restart' -> under the cap and the back-off has elapsed: hard-restart
+//   'alert'   -> the cap was just reached: surface to the operator (once)
+//   'skip'    -> within back-off, or already alerted past the cap
+//
+// The caller must tick consecutiveFailures past maxRestartAttempts when it
+// acts on 'alert', so subsequent ticks fall through to 'skip' and the alert
+// fires exactly once per down-spell (the counter is reset when the plugin
+// recovers, re-arming the alert for any future spell).
+export function decideDownAgentAction(
+  input: AgentRestartDecisionInput,
+  maxRestartAttempts: number,
+): DownAgentAction {
+  const failures = Number.isFinite(input.consecutiveFailures) && (input.consecutiveFailures ?? 0) > 0
+    ? Math.floor(input.consecutiveFailures as number)
+    : 0
+  if (maxRestartAttempts > 0 && failures >= maxRestartAttempts) {
+    return failures === maxRestartAttempts ? 'alert' : 'skip'
+  }
+  return shouldAutoRestartDownAgent(input) ? 'restart' : 'skip'
 }
 
 // Parse the elapsed-time string from `ps -o etime=` into seconds.

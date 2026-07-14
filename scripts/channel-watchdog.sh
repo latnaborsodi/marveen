@@ -12,10 +12,14 @@
 # on success, so a stale file means the session's MCP pipe is no longer doing
 # round-trips (wedged / deaf).
 #
-# Recovery: `tmux respawn-pane` of ONLY the <id>-channels pane. NEVER
-# `systemctl restart` -- the tmux SERVER is shared across every agent and lives
-# in the channels unit's cgroup (KillMode=control-group), so restarting the unit
-# would kill the server and every agent session, not just the main one.
+# Recovery: `tmux respawn-pane` of ONLY the <id>-channels pane -- the precise,
+# fleet-safe restart of just the main channels session. (Historically a
+# `systemctl restart` was outright forbidden here: the shared tmux SERVER lives
+# in the channels unit's cgroup, and under the old KillMode=control-group a
+# restart SIGKILLed the server and every agent session, not just the main one --
+# the 2026-06-26 fleet outage. The unit now runs KillMode=process so a restart is
+# no longer catastrophic, but respawn-pane stays preferred: it recovers only the
+# wedged pane without disturbing any sibling session.)
 #
 # Safety: a respawn-grace stamp prevents storming; a consecutive-respawn cap
 # stops a useless respawn loop when the keepalive is disabled or the problem is
@@ -42,9 +46,11 @@ MAIN_AGENT_ID="${MAIN_AGENT_ID:-marveen}"
 MAIN_AGENT_ID="${MAIN_AGENT_ID//[^a-zA-Z0-9_-]/}"
 SESSION="${MAIN_AGENT_ID}-channels"
 
-TMUX="$(command -v tmux)"
+# NB: use TMUX_BIN, not TMUX -- the latter is tmux's own env var (socket,pid,
+# session); assigning the binary path to it corrupts server-socket detection.
+TMUX_BIN="$(command -v tmux)"
 CLAUDE="$(command -v claude)"
-if [ -z "$TMUX" ] || [ -z "$CLAUDE" ]; then
+if [ -z "$TMUX_BIN" ] || [ -z "$CLAUDE" ]; then
   log "tmux or claude not on PATH; cannot act. PATH=$PATH"
   exit 0
 fi
@@ -52,7 +58,7 @@ fi
 now=$(date +%s)
 
 # --- gate 1: the channels session must EXIST (bridge "running") ---
-if ! "$TMUX" has-session -t "$SESSION" 2>/dev/null; then
+if ! "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
   log "session $SESSION not present -- systemd marveen-channels.service owns (re)start; watchdog no-op"
   exit 0
 fi
@@ -101,10 +107,10 @@ MODEL_FLAG=""
 
 # Full PATH with .bun/bin -- without it the respawned bun telegram bridge does
 # not come up and the session is channel-less.
-RESPAWN_CMD="export PATH=\"/opt/homebrew/bin:\$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:\$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin\" && $CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:telegram@claude-plugins-official"
+RESPAWN_CMD="export PATH=\"/opt/homebrew/bin:\$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:\$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin\" && export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false && $CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:telegram@claude-plugins-official"
 
 log "keepalive stale ${age}s (>${STALE_SECONDS}s) and session up -- respawn-pane $SESSION (respawn #$((count+1)))"
-if "$TMUX" respawn-pane -k -t "$SESSION" "$RESPAWN_CMD" 2>/dev/null; then
+if "$TMUX_BIN" respawn-pane -k -t "$SESSION" "$RESPAWN_CMD" 2>/dev/null; then
   date +%s > "$RESPAWN_STAMP"
   echo $(( count + 1 )) > "$RESPAWN_COUNT_FILE"
   log "respawn-pane issued"

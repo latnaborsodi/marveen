@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest'
 import {
   detectPaneState,
   detectsThinkingBlockError,
+  detectsBlockingMenu,
+  detectsPastePlaceholder,
   isReadyForPrompt,
   shouldRetrySubmit,
   shouldClearTruncatedPreamble,
@@ -10,6 +12,10 @@ import {
   stuckInputSignature,
   decideStuckInputRecovery,
   parkedChannelInput,
+  parkedInputText,
+  parkedInputRowCount,
+  submitLanded,
+  paneShowsContextSaturation,
 } from '../pane-state.js'
 
 // Realistic pane fixtures modelled on actual `tmux capture-pane -p`
@@ -103,6 +109,73 @@ const PENDING_PASTE = [
   '',
   SEP,
   '❯ [Pasted text #1 +234 chars]',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n')
+
+// Placeholder render from an OLDER Claude Code build: the bracketed-paste
+// detector REPLACES the idle footer (`bypass permissions on ...`) with a
+// `paste again to expand` hint, so the pane does NOT satisfy IDLE_FOOTER_RX.
+// The detector must NOT depend on this footer being present or absent -- the
+// footer shape is version-dependent. Kept as a regression case so the
+// box-scoped, footer-independent detector still classifies this shape.
+// The `[Pasted text #N]` stub here has no `+X chars` suffix, the other shape
+// the same build emits. The stub sits on the FIRST line of the live input box.
+const PENDING_PASTE_REALISTIC = [
+  '',
+  SEP,
+  '❯ [Pasted text #38]the quick brown fox jumps over the lazy dog the quick brown',
+  '  brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog',
+  '  the lazy dog the quick brown fox jumps over the lazy dog',
+  SEP,
+  '  paste again to expand',
+].join('\n')
+
+// SANITIZED reproduction of the REAL production render shape (derived from the
+// 6 captured incident panes, NOT copied verbatim -- the captures contain agent
+// names / real messages). Ground truth from the captures:
+//   - The long input WRAPS, so the stub straddles a line break: `...[Pasted
+//     text` at the end of one line and `  #N]...` at the start of the next.
+//     The single-space regex `[Pasted text #\d` MISSED this (false negative on
+//     2 of 3 real incidents).
+//   - The stub sits inside the LIVE INPUT BOX (the wrapped `❯` prompt line).
+//   - The footer is the NORMAL `bypass permissions on (shift+tab to cycle)`
+//     idle footer -- there is NO `paste again to expand` line. The detector
+//     must therefore not rely on that hint.
+// Benign filler stands in for the real (sensitive) message body.
+const PENDING_PASTE_WRAPPED_REAL_SHAPE = [
+  '',
+  SEP,
+  '❯ TEAM MEMBER NOTICE filler filler filler filler filler filler filler b[Pasted text',
+  '  #3]filler continuation of the wrapped message body in the live input box here',
+  '  more benign filler text continuing inside the same wrapped input box region',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n')
+
+// Same wrapped-stub real shape but with the DIGITS themselves straddling the
+// break: `#` at the end of one line, the digit at the start of the next. The
+// `\s*` between `#` and the digit must tolerate this too.
+const PENDING_PASTE_WRAPPED_DIGIT_SPLIT = [
+  '',
+  SEP,
+  '❯ filler filler filler filler filler filler filler filler filler [Pasted text #',
+  '  12]filler continuation of the parked message body inside the live input box',
+  SEP,
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n')
+
+// FALSE-POSITIVE guard: a `[Pasted text #N +X chars]` literal sits ONLY in an
+// upper reply line (these agents routinely quote tmux captures and discuss this
+// very bug), while the live input box at the bottom is EMPTY. A whole-pane
+// match would fire a destructive Ctrl-C + resend on a healthy, idle agent. The
+// box-scoped detector must return false here.
+const PASTE_ECHO_IN_SCROLLBACK_ONLY = [
+  '  Quoting a capture in a reply: [Pasted text #1 +900 chars] -- discussed in',
+  '  the stuck-input bug thread, just prose about the placeholder behaviour',
+  '',
+  SEP,
+  '❯ ',
   SEP,
   '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
 ].join('\n')
@@ -458,6 +531,29 @@ describe('detectPaneState', () => {
     expect(detectPaneState(IDLE_AFTER_TOOL_USE)).toBe('idle')
   })
 
+  it('does NOT classify a stale token-counter scrolled above the box as busy', () => {
+    // 94-retry starvation regression (2026-06-30): a completed turn's final
+    // "Accomplishing… (Ns · ↓ N tokens)" frame lingered well above the idle
+    // input box. The token-counter scan is region-scoped, so a counter that
+    // has scrolled out of the live bottom region must not pin the pane busy.
+    const staleCounter = [
+      '✶ Accomplishing… (3m 8s · ↓ 9.3k tokens)',
+      '⏺ Done: rebuilt and restarted the dashboard.',
+      '⏺ Verified endpoints, logged the fix.',
+      '⏺ Extra trailing scrollback line one.',
+      '⏺ Extra trailing scrollback line two.',
+      '⏺ Extra trailing scrollback line three.',
+      '⏺ Extra trailing scrollback line four.',
+      '⏺ Extra trailing scrollback line five.',
+      '',
+      SEP,
+      '❯ ',
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    expect(detectPaneState(staleCounter)).toBe('idle')
+  })
+
   it('detects typing when text is parked in the input box', () => {
     expect(detectPaneState(TYPING_PARKED)).toBe('typing')
   })
@@ -468,6 +564,28 @@ describe('detectPaneState', () => {
 
   it('treats a pending-paste placeholder as busy', () => {
     expect(detectPaneState(PENDING_PASTE)).toBe('busy')
+  })
+
+  it('treats the older-build placeholder (paste-again footer) as busy, not unknown', () => {
+    // Regression for the root-cause gap: the older placeholder render replaces
+    // the idle footer with `paste again to expand`, so it failed IDLE_FOOTER_RX
+    // and was mis-classified 'unknown' (slipping past the readiness/retry
+    // guards). The paste check now runs BEFORE the idle-footer gate.
+    expect(detectPaneState(PENDING_PASTE_REALISTIC)).toBe('busy')
+  })
+
+  it('treats the WRAPPED real-shape placeholder (normal idle footer) as busy', () => {
+    // The primary real-incident shape: wrapped stub inside the input box with
+    // the NORMAL idle footer below it. Must read 'busy' so the scheduler/router
+    // defer rather than pile a second prompt onto the parked placeholder.
+    expect(detectPaneState(PENDING_PASTE_WRAPPED_REAL_SHAPE)).toBe('busy')
+    expect(detectPaneState(PENDING_PASTE_WRAPPED_DIGIT_SPLIT)).toBe('busy')
+  })
+
+  it('stays idle when a stub is only quoted in scrollback and the box is empty', () => {
+    // False-positive guard: a `[Pasted text #N]` quoted in a reply line must
+    // not flip an idle, empty-box pane to 'busy'.
+    expect(detectPaneState(PASTE_ECHO_IN_SCROLLBACK_ONLY)).toBe('idle')
   })
 
   it('does NOT confuse a historical ❯ in scrollback for a parked input', () => {
@@ -766,6 +884,29 @@ describe('shouldRetrySubmit', () => {
     expect(shouldRetrySubmit(STUCK_MULTI_PLACEHOLDER_MIX, PAYLOAD_HINT)).toBe(true)
   })
 
+  it('detects the older-build placeholder (paste-again footer) as stuck', () => {
+    // Regression: the older placeholder render has the `paste again to expand`
+    // footer, not the idle footer, so the old footer-gate ordering returned
+    // false here. The placeholder check now precedes the idle-footer gate.
+    expect(shouldRetrySubmit(PENDING_PASTE_REALISTIC, '')).toBe(true)
+    expect(shouldRetrySubmit(PENDING_PASTE_REALISTIC, PAYLOAD_HINT)).toBe(true)
+  })
+
+  it('detects the WRAPPED real-shape placeholder (normal idle footer) as stuck', () => {
+    // The primary real-incident shape: wrapped stub + normal idle footer. The
+    // single-space regex missed the wrap; the wrap-tolerant box-scoped check
+    // now catches it so the recovery fires.
+    expect(shouldRetrySubmit(PENDING_PASTE_WRAPPED_REAL_SHAPE, '')).toBe(true)
+    expect(shouldRetrySubmit(PENDING_PASTE_WRAPPED_DIGIT_SPLIT, '')).toBe(true)
+  })
+
+  it('returns false when a stub is only quoted in scrollback (empty box)', () => {
+    // False-positive guard: must not fire a clear-and-resend when the stub is
+    // merely quoted above an empty input box.
+    expect(shouldRetrySubmit(PASTE_ECHO_IN_SCROLLBACK_ONLY, PAYLOAD_HINT)).toBe(false)
+    expect(shouldRetrySubmit(PASTE_ECHO_IN_SCROLLBACK_ONLY, '')).toBe(false)
+  })
+
   it('detects verbatim parked payload (footer idle, no spinner) as stuck', () => {
     // The payload substring sits in the live input box and the footer
     // shows bypass idle without any busy markers. Classic Incidens 2/5
@@ -1007,10 +1148,27 @@ describe('decideSubmitFollowup', () => {
     expect(decideSubmitFollowup(TYPING_PARKED, PAYLOAD_HINT, 0, 2)).toBe('done')
   })
 
-  it('returns "retry-enter" while attempts are below the cap', () => {
+  it('returns "retry-enter" for VERBATIM stuck text while below the cap', () => {
+    // Verbatim parked text (trailing Enter swallowed) submits on a plain
+    // Enter, so the verbatim path still routes to retry-enter.
     expect(decideSubmitFollowup(STUCK_VERBATIM, PAYLOAD_HINT, 0, 2)).toBe('retry-enter')
     expect(decideSubmitFollowup(STUCK_VERBATIM, PAYLOAD_HINT, 1, 2)).toBe('retry-enter')
-    expect(decideSubmitFollowup(PENDING_PASTE, '', 0, 2)).toBe('retry-enter')
+  })
+
+  it('returns "clear-and-resend" for a paste placeholder while below the cap', () => {
+    // A `[Pasted text #N]` placeholder is PROVEN not to submit on a plain
+    // Enter (Enter only expands it to still-parked verbatim text), so it must
+    // route to the clear-and-resend recovery, NOT retry-enter. Covers the
+    // single-line, older-build, and wrapped real-shape placeholders.
+    expect(decideSubmitFollowup(PENDING_PASTE, '', 0, 2)).toBe('clear-and-resend')
+    expect(decideSubmitFollowup(PENDING_PASTE_REALISTIC, '', 0, 2)).toBe('clear-and-resend')
+    expect(decideSubmitFollowup(PENDING_PASTE_WRAPPED_REAL_SHAPE, '', 0, 2)).toBe('clear-and-resend')
+  })
+
+  it('returns "done" when a stub is only quoted in scrollback (empty box)', () => {
+    // False-positive guard at the decision layer: a quoted stub above an empty
+    // box is not stuck, so no follow-up action fires.
+    expect(decideSubmitFollowup(PASTE_ECHO_IN_SCROLLBACK_ONLY, PAYLOAD_HINT, 0, 2)).toBe('done')
   })
 
   it('returns "give-up" once attempts reach the cap', () => {
@@ -1019,6 +1177,13 @@ describe('decideSubmitFollowup', () => {
     // burning more retries on a pane that refuses to flush.
     expect(decideSubmitFollowup(STUCK_VERBATIM, PAYLOAD_HINT, 2, 2)).toBe('give-up')
     expect(decideSubmitFollowup(STUCK_VERBATIM, PAYLOAD_HINT, 5, 2)).toBe('give-up')
+  })
+
+  it('returns "give-up" for a placeholder once attempts reach the cap', () => {
+    // A placeholder that survived the clear-and-resend budget must bail too,
+    // not loop forever clearing and re-sending.
+    expect(decideSubmitFollowup(PENDING_PASTE_REALISTIC, '', 4, 4)).toBe('give-up')
+    expect(decideSubmitFollowup(PENDING_PASTE, '', 2, 2)).toBe('give-up')
   })
 
   it('treats maxAttempts === 0 as "give-up on first stuck observation"', () => {
@@ -1392,5 +1557,466 @@ describe('detectPaneState: esc-to-interrupt scoped to live footer region', () =>
       '  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt',
     ].join('\n')
     expect(detectPaneState(pane)).toBe('busy')
+  })
+})
+
+describe('parkedInputText', () => {
+  const SEP2 = '─'.repeat(80)
+  const TYPING_PARKED2 = [
+    '', SEP2,
+    '❯ Valami amit a felhasznalo elkezdett geppelni, meg nem kuldte el',
+    SEP2,
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n')
+  const IDLE_EMPTY = [
+    '', SEP2, '❯ ', SEP2,
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n')
+  // A long inter-agent message wrapped across two input-box lines by the TUI.
+  const WRAPPED_PARKED = [
+    '', SEP2,
+    '❯ [Uzenet @system-tol]: Uj csapattag erkezett: balazsmarveenja. Udv',
+    '  neki ha legkozelebb beszeltek!',
+    SEP2,
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n')
+
+  it('returns the parked input text when typing', () => {
+    expect(parkedInputText(TYPING_PARKED2)).toBe(
+      'Valami amit a felhasznalo elkezdett geppelni, meg nem kuldte el',
+    )
+  })
+
+  it('returns null for an empty (idle) input box', () => {
+    expect(parkedInputText(IDLE_EMPTY)).toBe(null)
+  })
+
+  it('returns null when the pane is not Claude Code', () => {
+    expect(parkedInputText('user@host ~ $ ls\nREADME.md')).toBe(null)
+  })
+
+  it('collapses terminal-wrapped lines into a single submittable line', () => {
+    expect(parkedInputText(WRAPPED_PARKED)).toBe(
+      '[Uzenet @system-tol]: Uj csapattag erkezett: balazsmarveenja. Udv neki ha legkozelebb beszeltek!',
+    )
+  })
+})
+
+describe('parked input rendered with a non-breaking space (U+00A0) after ❯', () => {
+  // Live Claude Code panes render a NON-BREAKING SPACE (U+00A0), not an
+  // ASCII space, between the ❯ prompt glyph and parked (delivered-but-not-
+  // yet-submitted) text. Byte-for-byte the prompt line reads
+  //   e2 9d af (❯)  c2 a0 (NBSP)  <text>
+  // The ASCII-space form only shows up in scrollback for already-submitted
+  // lines. The original PARKED_INPUT_RX `/❯[ \t]+\S/` accepted only ASCII
+  // space or tab after the glyph, so an NBSP-rendered parked box fell
+  // through to 'idle'. And because every stuck-input recovery helper
+  // (stuckInputSignature, parkedChannelInput, parkedInputText) gates on
+  // detectPaneState === 'typing', that single miss took the whole recovery
+  // chain down: the delivered message stranded in the box forever, no
+  // recovery Enter was ever sent. Verified live 2026 on real captured panes.
+  const NBSP = '\u00a0'
+  const NBSP_PARKED = [
+    '', SEP,
+    `❯${NBSP}[Uzenet @dev2-tol]: please re-run the merge once CI is green`,
+    SEP,
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n')
+  // The same message with an ordinary ASCII space, so the fix is proven to
+  // keep the pre-existing form working rather than swap one gap for another.
+  const ASCII_PARKED = [
+    '', SEP,
+    '❯ [Uzenet @dev2-tol]: please re-run the merge once CI is green',
+    SEP,
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n')
+
+  it('classifies an NBSP-prompted parked box as typing, not idle', () => {
+    expect(detectPaneState(NBSP_PARKED)).toBe('typing')
+  })
+
+  it('still classifies the ASCII-space parked box as typing (no regression)', () => {
+    expect(detectPaneState(ASCII_PARKED)).toBe('typing')
+  })
+
+  it('merges an NBSP-parked box to busy when mergeTypingAsBusy is set', () => {
+    expect(detectPaneState(NBSP_PARKED, { mergeTypingAsBusy: true })).toBe('busy')
+  })
+
+  it('does not report an NBSP-parked pane as ready for a new prompt', () => {
+    expect(isReadyForPrompt(NBSP_PARKED)).toBe(false)
+  })
+
+  it('revives the stuck-input recovery chain (signature is non-null)', () => {
+    expect(stuckInputSignature(NBSP_PARKED)).not.toBe(null)
+  })
+
+  it('recovers the parked text with the ❯ prompt and NBSP stripped', () => {
+    expect(parkedInputText(NBSP_PARKED)).toBe(
+      '[Uzenet @dev2-tol]: please re-run the merge once CI is green',
+    )
+  })
+
+  // The production-critical stranding path: an inbound plugin notification
+  // (Telegram / inter-agent <channel> block) delivered into the box but not
+  // submitted, rendered with the NBSP gap. This is the exact shape that
+  // strands in the wild, so lock that parkedChannelInput recovers it intact.
+  it('recovers an NBSP-prompted parked CHANNEL block with the correct chat_id', () => {
+    const pane = [
+      '', SEP,
+      `❯${NBSP}<channel source="plugin:telegram:telegram" chat_id="1268077055" message_id="999" ts="2026-06-05T10:00:00Z">message body</channel>`,
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    const r = parkedChannelInput(pane)
+    expect(r).not.toBeNull()
+    expect(r!.complete).toBe(true)
+    expect(r!.chatId).toBe('1268077055')
+  })
+
+  // Real stranded messages are long and the TUI wraps them across input-box
+  // lines. Lock that NBSP + terminal-wrap collapse to one submittable line.
+  it('collapses a terminal-wrapped NBSP-parked message into one submittable line', () => {
+    const pane = [
+      '', SEP,
+      `❯${NBSP}[Uzenet @dev3-tol]: please review the latest changes when you`,
+      '  have a moment and re-run the merge once CI is green',
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    expect(detectPaneState(pane)).toBe('typing')
+    expect(parkedInputText(pane)).toBe(
+      '[Uzenet @dev3-tol]: please review the latest changes when you have a moment and re-run the merge once CI is green',
+    )
+  })
+
+  // The idle footer has two arms (bypass-permissions and the strict
+  // `? for shortcuts`). Lock NBSP detection under the strict arm too.
+  it('classifies an NBSP-parked box as typing under the strict shortcuts footer', () => {
+    const pane = [
+      '', SEP,
+      `❯${NBSP}[Uzenet @dev2-tol]: ping`,
+      SEP,
+      '  ? for shortcuts',
+    ].join('\n')
+    expect(detectPaneState(pane)).toBe('typing')
+  })
+})
+
+describe('detectsBlockingMenu', () => {
+  // The real /mcp "Manage MCP servers" modal that wedged the main channels
+  // session for ~6h (2026-06-12). The input box is gone; the footer shows the
+  // navigate/confirm/cancel hints instead of the permission footer.
+  const MCP_MENU = [
+    '   Manage MCP servers',
+    '   5 servers',
+    '',
+    '     claude.ai',
+    '   ❯ claude.ai Canva · ✔ connected · 39 tools',
+    '     claude.ai Google Calendar · ✔ connected · 8 tools',
+    '     claude.ai MailerLite · △ needs authentication',
+    '',
+    '   https://code.claude.com/docs/en/mcp for help',
+    '   ↑/↓ to navigate · Enter to confirm · Esc to cancel',
+  ].join('\n')
+
+  // A single-screen modal that only offers Esc to exit (no navigation row).
+  const ESC_ONLY_MODAL = [
+    '   Some dialog title',
+    '   body text here',
+    '',
+    '   Press Esc to exit',
+  ].join('\n')
+
+  it('detects the /mcp server-manager modal', () => {
+    expect(detectsBlockingMenu(MCP_MENU)).toBe(true)
+  })
+
+  it('detects an esc-only modal with no navigation row', () => {
+    expect(detectsBlockingMenu(ESC_ONLY_MODAL)).toBe(true)
+  })
+
+  it('is false for a normal idle prompt (bypass/strict)', () => {
+    expect(detectsBlockingMenu(IDLE_BYPASS)).toBe(false)
+    expect(detectsBlockingMenu(IDLE_STRICT)).toBe(false)
+  })
+
+  it('is false for a busy turn even if it renders esc-to-interrupt', () => {
+    expect(detectsBlockingMenu(BUSY_FULL_FOOTER)).toBe(false)
+    expect(detectsBlockingMenu(BUSY_TOKENS_ONLY)).toBe(false)
+  })
+
+  it('is false for an empty pane', () => {
+    expect(detectsBlockingMenu('')).toBe(false)
+    expect(detectsBlockingMenu('   \n  ')).toBe(false)
+  })
+
+  it('does not trigger on a reply that merely quotes menu chrome above a live prompt', () => {
+    const quoted = [
+      '  Tipp: a /mcp menuben az "Esc to cancel" sorral lepsz ki.',
+      '',
+      SEP,
+      '❯ ',
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    expect(detectsBlockingMenu(quoted)).toBe(false)
+  })
+})
+
+describe('detectsPastePlaceholder', () => {
+  it('detects the `[Pasted text #N +X chars]` stub', () => {
+    expect(detectsPastePlaceholder(PENDING_PASTE)).toBe(true)
+  })
+
+  it('detects the bare `[Pasted text #N]` stub (no +X chars suffix)', () => {
+    // The older build emits the bare shape (with `paste again to expand`
+    // footer); both stub shapes must match regardless of the footer.
+    expect(detectsPastePlaceholder(PENDING_PASTE_REALISTIC)).toBe(true)
+  })
+
+  it('detects the WRAPPED stub (real shape: line break between `[Pasted text` and `#N`)', () => {
+    // The primary real-incident case: a long input wraps so the stub straddles
+    // a line break, and the footer is the NORMAL idle footer (no `paste again
+    // to expand`). The single-space regex missed this on 2 of 3 real incidents.
+    expect(detectsPastePlaceholder(PENDING_PASTE_WRAPPED_REAL_SHAPE)).toBe(true)
+  })
+
+  it('detects the wrapped stub when the DIGITS straddle the line break', () => {
+    // `#` at the end of one line, the digit at the start of the next.
+    expect(detectsPastePlaceholder(PENDING_PASTE_WRAPPED_DIGIT_SPLIT)).toBe(true)
+  })
+
+  it('is false when a stub appears ONLY in an upper reply line (scoped to the box)', () => {
+    // False-positive guard (the confirmed bug): a `[Pasted text #N]` quoted in
+    // scrollback / a reply while the live input box is empty must NOT trigger a
+    // destructive clear-and-resend on a healthy idle agent.
+    expect(detectsPastePlaceholder(PASTE_ECHO_IN_SCROLLBACK_ONLY)).toBe(false)
+  })
+
+  it('detects a multi-stub mixed buffer', () => {
+    expect(detectsPastePlaceholder(STUCK_MULTI_PLACEHOLDER_MIX)).toBe(true)
+  })
+
+  it('is false on a clean idle pane', () => {
+    expect(detectsPastePlaceholder(IDLE_BYPASS)).toBe(false)
+    expect(detectsPastePlaceholder(IDLE_STRICT)).toBe(false)
+  })
+
+  it('is false on a busy pane', () => {
+    expect(detectsPastePlaceholder(BUSY_FULL_FOOTER)).toBe(false)
+    expect(detectsPastePlaceholder(BUSY_TOKENS_ONLY)).toBe(false)
+  })
+
+  it('is false on verbatim parked text (no stub)', () => {
+    expect(detectsPastePlaceholder(STUCK_VERBATIM)).toBe(false)
+    expect(detectsPastePlaceholder(TYPING_PARKED)).toBe(false)
+  })
+
+  it('is false on an empty / whitespace pane', () => {
+    expect(detectsPastePlaceholder('')).toBe(false)
+    expect(detectsPastePlaceholder('   \n  ')).toBe(false)
+  })
+
+  it('does NOT key on the `paste again to expand` hint alone', () => {
+    // The hint LINGERS for a frame after the message submits (box already
+    // empty, stub gone). Keying on it would false-positive a freshly-
+    // submitted pane as still stuck. Only the `[Pasted text #N]` stub counts.
+    const submittedButHintLingers = [
+      '  ⏺ Done.',
+      '',
+      SEP,
+      '❯ ',
+      SEP,
+      '  paste again to expand',
+    ].join('\n')
+    expect(detectsPastePlaceholder(submittedButHintLingers)).toBe(false)
+  })
+
+  it('matches the stub when it sits inside the live input box', () => {
+    // Scoped to the box: a stub on the prompt line (between the separators) is
+    // a genuine parked placeholder and must match, regardless of whether the
+    // footer is the normal idle footer or `paste again to expand`.
+    const stubInBox = [
+      'some preceding line',
+      SEP,
+      '❯ leading text [Pasted text #7] trailing text',
+      SEP,
+      '  paste again to expand',
+    ].join('\n')
+    expect(detectsPastePlaceholder(stubInBox)).toBe(true)
+  })
+})
+
+describe('parkedInputRowCount', () => {
+  it('returns 0 for an empty input box (bare prompt)', () => {
+    expect(parkedInputRowCount(IDLE_BYPASS)).toBe(0)
+    expect(parkedInputRowCount(BUSY_FULL_FOOTER)).toBe(0)
+  })
+
+  it('returns 0 when there is no input box at all', () => {
+    expect(parkedInputRowCount('just scrollback text\nno separators here')).toBe(0)
+  })
+
+  it('returns 1 for a single-row parked input', () => {
+    expect(parkedInputRowCount(TYPING_PARKED)).toBe(1)
+    expect(parkedInputRowCount(PENDING_PASTE)).toBe(1)
+  })
+
+  it('counts every visual row of a wrapped multi-row parked input', () => {
+    // A wrapped message occupying 3 box-interior rows; a bare Enter here would
+    // insert a newline instead of submitting.
+    const multiRow = [
+      '',
+      SEP,
+      '❯ first line of a long parked message that wraps across',
+      '  several visual rows inside the input box and would not',
+      '  submit on a bare Enter',
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    expect(parkedInputRowCount(multiRow)).toBe(3)
+  })
+})
+
+describe('submitLanded', () => {
+  // The exact text parked before the submit attempt.
+  const parkedSig = stuckInputSignature(TYPING_PARKED) as string
+
+  it('captures a non-empty signature from the parked fixture', () => {
+    expect(parkedSig).toBeTruthy()
+  })
+
+  it('is false when the identical signature is still parked', () => {
+    expect(submitLanded(parkedSig, TYPING_PARKED)).toBe(false)
+  })
+
+  it('is true when the box cleared (pane went idle)', () => {
+    expect(submitLanded(parkedSig, IDLE_BYPASS)).toBe(true)
+  })
+
+  it('is true when the agent started processing (pane went busy)', () => {
+    expect(submitLanded(parkedSig, BUSY_FULL_FOOTER)).toBe(true)
+  })
+
+  it('is true when different text is now parked', () => {
+    expect(submitLanded(parkedSig, PENDING_PASTE)).toBe(true)
+  })
+
+  it('is false when there is no after-capture (null)', () => {
+    expect(submitLanded(parkedSig, null)).toBe(false)
+  })
+})
+
+// Fresh-session / welcome-screen layout (Claude Code logo + model line + cwd,
+// the input box framed by two ──── rules, ❯ prefix, NO footer). Modelled on a
+// real captured stuck pane (store/qwen-welcome-stuck-fixture.txt) where a
+// delivered multi-row message parked before any footer rendered, and the whole
+// recovery stack went blind (liveInputBox null -> detectPaneState 'unknown').
+const WELCOME_STUCK = [
+  '',
+  ' ▐▛███▜▌   Claude Code v2.1.170',
+  '▝▜█████▛▘  qwen3.6:27b-192k with high effort · API Usage Billing',
+  '  ▘▘ ▝▝    ~/ClaudeClaw/agents/qwen',
+  '',
+  '',
+  SEP,
+  '❯ kepet: /Users/marvin/workspace/aahe486-screenshot.png',
+  '  Olvasd be a Read tool-lal a kepfajlt, majd mondd meg: (1) mi ez az',
+  '  alkalmazas, (2) a tablazat konkret ertekei. Roviden a vegeredmenyt.',
+  '  </trusted-peer>',
+  SEP,
+  '',
+].join('\n')
+
+describe('footer-less welcome-screen parked input', () => {
+  it('classifies the parked box as typing (not unknown)', () => {
+    expect(detectPaneState(WELCOME_STUCK)).toBe('typing')
+  })
+
+  it('mergeTypingAsBusy folds the footer-less parked box into busy', () => {
+    expect(detectPaneState(WELCOME_STUCK, { mergeTypingAsBusy: true })).toBe('busy')
+  })
+
+  it('stuckInputSignature recovers a non-null signature', () => {
+    const sig = stuckInputSignature(WELCOME_STUCK)
+    expect(sig).not.toBeNull()
+    expect(sig).toContain('kepet')
+  })
+
+  it('parkedInputText returns the collapsed multi-row message (not empty)', () => {
+    const t = parkedInputText(WELCOME_STUCK)
+    expect(t).not.toBeNull()
+    expect(t).not.toBe('')
+    expect(t).toContain('Olvasd be')
+  })
+
+  it('parkedInputRowCount counts every wrapped row (> 1 on a real wedge)', () => {
+    expect(parkedInputRowCount(WELCOME_STUCK)).toBe(4)
+    expect(parkedInputRowCount(WELCOME_STUCK)).toBeGreaterThan(1)
+  })
+
+  it('submitLanded fires once the welcome wedge clears to an idle pane', () => {
+    // Full P1 -> P2 chain on the real wedge: detection sees the footer-less
+    // parked box (sig != null), and after the message submits the pane is no
+    // longer that signature -> submitLanded true. This is what tells the
+    // recovery ladder the resubmit actually landed.
+    const sig = stuckInputSignature(WELCOME_STUCK)
+    expect(sig).not.toBeNull()
+    expect(submitLanded(sig as string, IDLE_BYPASS)).toBe(true)
+  })
+
+  it('does NOT mistake a scrollback ──── pair without a ❯ box for input', () => {
+    const noBox = ['some scrollback line', SEP, 'plain text, no prompt glyph', SEP, ''].join('\n')
+    expect(detectPaneState(noBox)).toBe('unknown')
+    expect(parkedInputRowCount(noBox)).toBe(0)
+  })
+})
+
+describe('paneShowsContextSaturation', () => {
+  // Real capture shape observed live: an idle, ready-looking footer with the
+  // saturation banner one line above it — the combination that lets a
+  // saturated session keep silently accepting new dispatches.
+  const CTX_SAT_IDLE = [
+    '  some prior assistant output',
+    '',
+    '✻ Cooked for 3m 7s',
+    '                                                              100% context used',
+    SEP,
+    '❯ ',
+    SEP,
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n')
+
+  it('detects the saturation banner on an otherwise-idle pane', () => {
+    expect(detectPaneState(CTX_SAT_IDLE)).toBe('idle') // sanity: still reads as idle
+    expect(paneShowsContextSaturation(CTX_SAT_IDLE)).toBe(true)
+  })
+
+  it('is false on a normal idle pane', () => {
+    expect(paneShowsContextSaturation(IDLE_BYPASS)).toBe(false)
+    expect(paneShowsContextSaturation(IDLE_STRICT)).toBe(false)
+  })
+
+  it('is false on a normal busy pane (no false alarm mid-turn)', () => {
+    expect(paneShowsContextSaturation(BUSY_FULL_FOOTER)).toBe(false)
+  })
+
+  it('does NOT misfire on a scrollback quote of the same phrase', () => {
+    const quoted = [
+      '  QA report: the watchdog now greps for "100% context used" in the footer.',
+      '  This is a scrollback quote, not the live indicator.',
+      ...Array.from({ length: 10 }, () => '  more scrollback padding'),
+      SEP,
+      '❯ ',
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    expect(paneShowsContextSaturation(quoted)).toBe(false)
+  })
+
+  it('is false on empty/null-ish input', () => {
+    expect(paneShowsContextSaturation('')).toBe(false)
+    expect(paneShowsContextSaturation('   \n  ')).toBe(false)
   })
 })
