@@ -293,7 +293,15 @@ interface SystemInfo {
 interface HeartbeatData {
   timestamp: Date
   calendar: CalendarEvent[]
-  kanban: { urgent: number; in_progress: number; waiting: number; urgentTitles: string[]; waitingTitles: string[] }
+  kanban: {
+    urgent: number
+    in_progress: number
+    waiting: number
+    urgentTitles: string[]
+    waitingTitles: string[]
+    recentlyCreated: number
+    recentlyCreatedTitles: string[]
+  }
   system: SystemInfo
   tasks: { count: number; nextRun: number | null }
 }
@@ -320,10 +328,20 @@ function collectKanban(): HeartbeatData['kanban'] {
       waiting: summary.waiting.length,
       urgentTitles: summary.urgent.map((c) => c.title),
       waitingTitles: summary.waiting.map((c) => c.title),
+      recentlyCreated: summary.recentlyCreated.length,
+      recentlyCreatedTitles: summary.recentlyCreated.map((c) => c.title),
     }
   } catch (err) {
     logger.error({ err }, 'Heartbeat: kanban fetch failed')
-    return { urgent: 0, in_progress: 0, waiting: 0, urgentTitles: [], waitingTitles: [] }
+    return {
+      urgent: 0,
+      in_progress: 0,
+      waiting: 0,
+      urgentTitles: [],
+      waitingTitles: [],
+      recentlyCreated: 0,
+      recentlyCreatedTitles: [],
+    }
   }
 }
 
@@ -356,24 +374,23 @@ function shouldNotify(data: HeartbeatData): boolean {
 
   if (data.system.dbWarning) return true
 
-  // 22:00 utan csendes ablak -- csak igazi rendszer-vesz (dbWarning, fent
-  // mar return-olt) lephet at. Stale urgent kanban-kartyak este nem zavarjak
-  // a felhasznalot.
+  // 22:00 utan csendes ablak -- csak igazi rendszer-vesz (dbWarning) lephet at.
   if (hour >= 22) return false
 
-  if (hour >= 21) {
-    return data.kanban.urgent > 0
-  }
+  // 21:00 utan: csak urgent.
+  if (hour >= 21) return data.kanban.urgent > 0
 
-  if (isWeekend) {
-    return data.kanban.urgent > 0
-  }
+  // Hetvegen: csak urgent vagy uj kartya.
+  if (isWeekend) return data.kanban.urgent > 0 || data.kanban.recentlyCreated > 0
 
-  if (data.calendar.length > 0) return true
-  if (data.kanban.urgent > 0) return true
-  if (data.kanban.waiting > 2) return true
-
-  return false
+  // Munkanap nappal: lefuttatjuk az agentet (igy a Telegram-be-irjak-e? dontes
+  // az emailek MCP-ellenorzeset is figyelembe veszi a buildAgentPrompt notify-
+  // szabalya szerint), DE csak akkor, ha a sync-elerheto adatok kozul valami
+  // indokolja, hogy email-check-en kivul kerdes legyen. Email-only trigger
+  // esetere az agentnek mindenkeppen futnia kell, ezert default: lefutunk.
+  // A buildAgentPrompt KOTELEZO szabalya gondoskodik rola, hogy ures
+  // "csend van" pulse-okat NE kuldjon.
+  return true
 }
 
 // --- Agent prompt ---
@@ -385,9 +402,22 @@ function buildAgentPrompt(data: HeartbeatData): string {
   // attacker-controlled strings (calendar/kanban/email titles) appear.
   let prompt = UNTRUSTED_PREAMBLE + '\n'
   prompt += `Heartbeat ellenorzes -- ${timeStr}\n\n`
+<<<<<<< ours
   prompt += `Az alabbi adatokat gyujtottem nativ modon (API/DB). Fogalmazz tomor, emberi osszefoglalot ${OWNER_NAME} szamara.\n`
   prompt += `FONTOS: Nezd meg az emaileket is MCP-n keresztul (search_emails, utolso 2 ora, olvasatlanok).\n`
   prompt += `Hasznald a HEARTBEAT.md formatumot.\n\n`
+=======
+
+  prompt += `## NOTIFY-SZABALY (KOTELEZO)\n\n`
+  prompt += `CSAK AKKOR kuldj Telegram-uzenetet, ha legalabb EGY az alabbiak kozul igaz:\n`
+  prompt += `- olvasatlan email az elmult ~2 oras ablakban (ellenorizd search_emails-szel)\n`
+  prompt += `- naptar-esemeny a kovetkezo 2 oraban (lasd Naptar szekciot lent)\n`
+  prompt += `- urgent kanban-kartya (lasd Kanban szekciot lent)\n`
+  prompt += `- UJ kanban-kartya, ami az utolso ~65 percben jott letre (a "csak vár, régóta áll" NEM szamit ujnak; ezekrol NE pingelj)\n\n`
+  prompt += `Ha EGYIK SEM teljesul, valaszolj URES sztringgel (semmilyen text, semmilyen "csend van" pulse, semmilyen "a bitek unatkoznak" tipusu uzenet). A heartbeat tovabbra is fut belul (logban marad), Telegram-zaj NULLA.\n\n`
+
+  prompt += `Az alabbi adatokat gyujtottem nativ modon (API/DB). Ha kuldesz uzenetet, fogalmazz tomor, emberi osszefoglalot Donatnak. Hasznald a HEARTBEAT.md formatumot.\n\n`
+>>>>>>> theirs
 
   // Calendar -- event summaries and attendee names come from whoever sent the
   // invite, so every one is wrapped individually as untrusted data.
@@ -419,6 +449,11 @@ function buildAgentPrompt(data: HeartbeatData): string {
   prompt += `- Waiting: ${data.kanban.waiting}`
   if (data.kanban.waitingTitles.length > 0) {
     prompt += ` ${wrapUntrusted('kanban-waiting-titles', data.kanban.waitingTitles.join(', '))}`
+  }
+  prompt += '\n'
+  prompt += `- UJ (utolso 65 perc): ${data.kanban.recentlyCreated}`
+  if (data.kanban.recentlyCreatedTitles.length > 0) {
+    prompt += ` ${wrapUntrusted('kanban-recently-created-titles', data.kanban.recentlyCreatedTitles.join(', '))}`
   }
   prompt += '\n\n'
 
