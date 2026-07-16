@@ -1,20 +1,24 @@
-# 💭 Dream Engine — 2026-07-15 07:33 (késve futott: 02:07 helyett restart után)
+# 💭 Dream Engine — 2026-07-16 07:32 (késve futott: 02:07 helyett channels-restart után)
 
 ## 💡 Skill-javaslatok
-- **Pre-restart context-save** (agent: jezus/marveen) — 24h alatt 2× ismétlődött a "channel plugin hard restart előtt mentsd a kontextust" művelet (hot memória + daily-log ugyanazzal a curl-párral). Kis, de determinisztikus workflow, skillbe önthető, hogy ne kézzel fogalmazzam újra minden restartnál. — *előbb ellenőrizni, nem fedi-e a handoff skill.*
+Nincs új javaslat. Az elmúlt 24h csak 2 memóriát hozott (jezus skip-skill jegyzet + marveen napi napló), nincs 3+ ismétlődő manuális pattern.
 
 ## 🧹 Memória-egészség
-64 / 71 vektorizált (7 vektorizálatlan: 23,24,34,35,50,51 teszt/dupla cold + 72 daily-log — a fire-and-forget embedding-job rendezi). 0 antikvált hot-tier mozgatandó (#67 1 napos, #73 friss). Duplikátumok (mind már cold, nem törlöm): "Szeretem a kavét" ×3 (23/34/50), "Mai megbeszeles eredmenye" ×3 (24/35/51), plusz agent-id config dupék (6/7/8, 3/5, 11/12).
+73 / 65 vektorizált (8 vektorizálatlan: 6 teszt-adat "Szeretem a kavét"/"Mai megbeszeles eredmenye" 23/24/34/35/50/51 + 2 napi napló 72,75 — utóbbit az embedding-job rendezi). 0 antikvált hot-tier. Dedup: a talált azonos-content sorok többsége agent-enkénti legitim config-másolat (Donat chat_id 6/7/8, agent_id szabály), NEM valódi duplikátum — nem mozgattam. A valódi azonos-agent párok (jezus delegáció 11/12, tourguidebackend agent_id 3/5) már rendelkeznek cold példánnyal. Törlés nem történt.
 
 ## 🎯 Top-3 holnapi javaslat
-1. tebez: XML export lokális asset URL (41802bc4, high, railsdev) — tebezboss tegnap XML-export bugfixet zárt, ez a terület aktív, a kártya magas prioritású.
-2. tourguide: QR P1 Tour-szintű QR token landing (6d685004, high, tourguidebackend) — magas prioritás, backend agent rendelve, nincs blokker rajta.
-3. tourguide: Évi városleírás-review Szeged+Baja (39e82860, high, janos, ~40 napja waiting) — blokkolja a 8f496923 célnyelvi content pipeline-t; Évi korábban jelezte, hogy hozzájárulna a tartalomhoz, tehát az input-blokk feloldható egy pinggel.
+1. tourguide: QR P1 Tour-szintű QR token landing (6d685004, high, tourguidebackend) — unblocked, backend agent rendelve, kritikus a helyszíni QR-élményhez.
+2. tebez: XML export lokális asset URL (41802bc4, high, railsdev) — beszállítói CDN helyett saját tárhely URL; tebezboss tegnap XML-export bugfixet zárt, aktív vonal.
+3. tourguide: célnyelvi content + audio (8f496923, high, waiting, janos) — INPUT-várásban; nudge janos-nak mi blokkolja, mert az Évi review (39e82860) is rajta függ.
 
 ## 🌐 External opportunity
-- **coreyhaines31/marketingskills** (https://github.com/coreyhaines31/marketingskills) — CRO, copywriting, SEO, analytics, growth skillek Claude Code-hoz. Releváns Donatnak: AI-tartalomgyártás + tourguide landing/marketing a magyar és inbound piacra. (Előző heti ajánlás: OpenClaudia/openclaudia-skills.)
+Skip — heti limit elérve (store/external-ops-last-run: 2026-07-15 07:48, 7 napon belül; tegnap coreyhaines31/marketingskills volt az ajánlás).
 
 ## 🛠 Skill-flotta health
-- Minden nem-pinned skill (12 db: fleet-helper, handoff, retrospective, skill-factory, diagnose-*, tourguide-*, stb.) célzottnak és frissnek tűnik. Use-log hiányában nincs bizonyíték >30 napos nem-használatra, ezért törlést nem javaslok.
+Use-log hiányában nincs bizonyíték >30 napos nem-használatra, ezért destruktív javaslatot nem teszek. Minden nem-pinned skill célzottnak és frissnek tűnik.
 
-*Marveen, 07:33 — most már alszom én is (kicsit későn, a restart miatt).*
+## ⚠️ Hibák
+- Duplikált kanban-kártya: "Évi: városleírás-review (Szeged + Baja, HU+EN)" kétszer szerepel — 45360166 (planned, assignee=evi) ÉS 39e82860 (waiting, tourguide, high, assignee=janos). Érdemes egyet lezárni/összevonni.
+- Az éjszakai dream-engine futást ~02:07-nél egy channels hard-restart megszakította; a DREAM.md most, 07:32-kor készült el az újraindult sessionben (a 07:30 reggeli napindító után csúszhatott).
+
+*Marveen, 07:32 — most már alszom én is (kicsit későn, a restart miatt).*
