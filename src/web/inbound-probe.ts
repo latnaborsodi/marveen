@@ -387,3 +387,6 @@ export function startInboundProber(): void {
 
   logger.info({ probeIntervalMs }, 'Inbound prober started')
 }
+
+// Fork-only (latnaborsodi): re-export so existing tests/importers keep working.
+export { checkBotTokenHealth } from './bot-token-health.js'
