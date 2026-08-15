@@ -50,8 +50,18 @@ const SELF_PACE_BASH_PATTERNS = [
   /\btmux\b[\s\S]*\b(send-keys|paste-buffer|run-shell|set-buffer)\b/i,
   // self-backgrounding that relaunches claude (nohup/setsid/disown + claude)
   /\b(nohup|setsid|disown)\b[\s\S]*\bclaude\b/i,
-  // the loop slash-skill driven from a shell
-  /\bclaude\b[\s\S]*\/loop\b/i,
+  // the loop slash-skill driven from a shell. `/loop` must be in SLASH-COMMAND
+  // position -- a standalone token (segment-start / whitespace / quote before it,
+  // whitespace / quote / end after it) -- never a PATH segment. The old
+  // `\/loop\b` fired on any `loop`-prefixed path component whenever `.claude` was
+  // in the same command (\bclaude\b matches the `.claude` in every memory/skill
+  // path), so reading `.../memory/loop-stop-...md` or `~/.claude/skills/loop/...`
+  // was denied (measured 2026-07-26, found by pg: Heli denied a harmless memory
+  // read). Same bug class as the at/batch and launchctl fixes below: a keyword in
+  // a PATH collided with a call pattern; the fix is to match the invocation SHAPE.
+  // Every real form stays denied: `claude /loop 5m`, `claude -p "/loop x"`,
+  // `claude '/loop'`, bare `claude /loop`.
+  /\bclaude\b[\s\S]*(?:^|[\s'"])\/loop(?=[\s'"]|$)/i,
 ]
 
 // OS-level schedulers + delayed exec (cron / launchd / systemd / at / batch): the
@@ -68,7 +78,43 @@ const SCHED_PREFIX = String.raw`(?:(?:[A-Za-z_]\w*=\S*|sudo|env|command|exec|nic
 // (`X=`crontab -r``) is caught too -- both run the enclosed command in a shell
 // context, so a scheduler binary immediately inside either is a real self-pace.
 const SCHED_BOUNDARY = '[;&|(`]'
-const SCHEDULER_RX = new RegExp(String.raw`(^|${SCHED_BOUNDARY}\s*)${SCHED_PREFIX}(crontab|launchctl|systemd-run|batch|at)\b(?!-)(?!\s*=)`, 'i')
+// `at` and `batch` are also ordinary English words, and splitSegments splits on
+// NEWLINES -- so a PROSE line inside a multi-line commit body ("at least 80% of
+// entries", "batch size is 50") lands at a segment start and looked exactly like
+// the at(1)/batch(1) binaries. Measured 2026-07-25 (found by JogAsz): a heredoc
+// commit message was denied for the words "at least"; the identical command
+// passed after rewording that one line. The `-m "$(...)"` form is deliberately
+// NOT blanked by stripGitCommitMessages (a real substitution could hide there),
+// so the body does reach the splitter -- the fix belongs here, not there.
+//
+// For these two words ONLY, also require something that looks like an actual
+// invocation: end of segment (a bare `batch` reads stdin -- still a real vector),
+// a flag, an input redirect, or an at(1) TIMESPEC (which at(1) requires anyway,
+// so a real submit can never omit it). crontab/launchctl/systemd-run keep the
+// plain match: they are not English words, so prose cannot collide with them.
+const AT_INVOCATION = String.raw`(?=\s*$|\s+-|\s*<|\s+(?:now|noon|midnight|teatime|today|tomorrow|next\b|\+\s*\d|\d{1,2}:\d{2}|\d{3,4}\b|\d{1,2}\s*(?:am|pm)\b|\d{1,2}[./]\d{1,2}|(?:mon|tue|wed|thu|fri|sat|sun)|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)))`
+// `launchctl` needed the SAME narrowing, for a different reason than at/batch, and
+// the comment above ("not English words, so prose cannot collide") was measured
+// wrong on 2026-07-26 (found by Hacker). It is not an English word -- but the
+// fleet's own heartbeats ORDER every agent to report `launchctl list | grep
+// com.jarvis.channels` output, so a launchd JOB LABEL appears in prose constantly.
+// splitSegments splits on `;`, so a report line "...; launchctl com.jarvis.channels
+// PID 555" put `launchctl <label>` at a segment start and it read as a real
+// invocation. His status message was denied; the finding is systemic, not his.
+//
+// The narrowing mirrors AT_INVOCATION: instead of enumerating dangerous
+// subcommands (a denylist -- miss one and it is a hole), require the SHAPE of a
+// real invocation. Every launchctl self-pace vector (load/bootstrap/submit/
+// kickstart/start/enable/...) takes a SUBCOMMAND word first, so demand that the
+// next token could be one: a bare lowercase word, no dot and no slash. A job
+// label (`com.jarvis.channels`) and a path both fail that and pass through as
+// prose. End-of-segment and a flag stay DENIED -- a bare `launchctl` is
+// interactive, still a real vector.
+const LAUNCHCTL_SUBCOMMAND = String.raw`(?=\s*$|\s+-|\s+[a-z][a-z-]*(?:\s|$))`
+const SCHEDULER_RX = new RegExp(
+  String.raw`(^|${SCHED_BOUNDARY}\s*)${SCHED_PREFIX}(?:(?:crontab|systemd-run)\b(?!-)(?!\s*=)|launchctl\b(?!-)(?!\s*=)${LAUNCHCTL_SUBCOMMAND}|(?:batch|at)\b(?!-)(?!\s*=)${AT_INVOCATION})`,
+  'i',
+)
 // ...but allow a pure READ-listing of one's own schedule (parity with the store /
 // schedule-API read exemptions): crontab -l, launchctl list/print, atq.
 const SCHEDULER_READ_RX = new RegExp(String.raw`(^|${SCHED_BOUNDARY}\s*)${SCHED_PREFIX}(crontab\s+-l\b|launchctl\s+(?:list|print|dumpstate|blame|examine)\b|atq\b)`, 'i')
@@ -105,6 +151,120 @@ export function splitSegments(command) {
     .split(/&&|\|\||[;&|]|\r?\n/)
     // trim so a leading-separator segment (" at now") anchors at ^ correctly
     .map((s) => s.trim())
+}
+
+// Split like splitSegments, but ONLY on separators the shell would actually
+// treat as separators -- never on one that sits inside a quoted string or a
+// heredoc body. Returns null when the quoting cannot be resolved with
+// confidence, and every caller must then fall back to the naive splitter.
+//
+// WHY THIS EXISTS (measured 2026-08-05, five denials in one morning -- three
+// mine, two taric's): splitSegments is not quote-aware, so PROSE can manufacture
+// a command position that never existed. All five denials had the same cause: a
+// grep pattern quoted inside an inter-agent message,
+//   Minta: stop.sh <bar> launchctl <bar> com.janna.dashboard
+// The `<bar>` split it, the middle piece trimmed down to the bare word
+// `launchctl`, and SCHEDULER_RX's end-of-segment branch reads a bare `launchctl`
+// as a real (interactive) invocation -- correctly, for a real command line.
+// Nothing was scheduled; five messages simply never went out. From outside, a
+// hard-gate denial is indistinguishable from an agent that stayed silent.
+//
+// The route decided it: the SAME text passes as `curl -d '<json>'` (the payload
+// is blanked by stripDataPayloads) and is denied when sent from a python
+// heredoc, which has no -d argument to blank. Choosing how to send a message
+// had quietly become a security decision. stripDataPayloads' own comment names
+// this false-positive class as its target -- it is implemented for exactly one
+// route, so the gap is unfinished work, not an oversight.
+//
+// SCOPE, and this is the part that matters: the result feeds ONLY the anchored
+// scheduler check. The unanchored patterns (tmux+send-keys, nohup+claude,
+// claude+/loop) keep scanning naive segments, quoted regions included, because
+// they do NOT depend on a command position that prose can fake -- and because
+// measurement showed the naive scan is what catches a real
+// `subprocess.run(['tmux','send-keys',...])` hidden in a heredoc body. Handing
+// them quote-aware segments would have removed the detection of the very
+// incident vector this gate was built for, under the banner of a structural fix.
+//
+// FAIL-CLOSED in three places, because "could not parse" must mean "scan more",
+// never "scan less":
+//   - unterminated quote or heredoc -> null (caller uses the naive split)
+//   - a double-quoted region containing $(...) or a backtick -> null; the shell
+//     runs what is inside, so a `;` in there IS a real separator
+//   - a heredoc with an UNQUOTED tag whose body contains $(...) or a backtick
+//     -> null, same reason (an unquoted tag expands the body)
+// NOTE ON THE SHAPE OF THIS FIX. The first attempt made the SEGMENTER
+// quote-aware and left the regexes alone. It failed one corpus case:
+//   echo 'grep: foo <bar> crontab <bar> bar'
+// stayed denied, because SCHEDULER_RX carries its OWN boundary anchor
+// (SCHED_BOUNDARY includes the bar), so it re-finds a command position INSIDE a
+// segment. Keeping the quoted text in the segment at all was the mistake. The
+// `launchctl` cases passed only by luck -- LAUNCHCTL_SUBCOMMAND's lookahead
+// happened to reject the following bar. So the primitive is not "split more
+// carefully", it is "the inert text must not be there": mask it out, then let
+// the existing splitter and regexes run unchanged on what remains.
+export function maskInertLiterals(command) {
+  const src = String(command ?? '').replace(/\\\r?\n/g, ' ')
+  let cur = ''
+  let i = 0
+
+  // Inert regions collapse to spaces: the text is gone, and with it every
+  // separator inside it -- which is precisely what prose was faking.
+  const blank = (s) => ' '.repeat(s.length)
+
+  while (i < src.length) {
+    const c = src[i]
+
+    // backslash escape outside quotes: consumes the next character
+    if (c === '\\' && i + 1 < src.length) { cur += src.slice(i, i + 2); i += 2; continue }
+
+    // heredoc: <<TAG / <<-TAG / <<'TAG' / <<"TAG"
+    const here = /^<<-?\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z_]\w*))/.exec(src.slice(i))
+    if (here) {
+      const tag = here[1] ?? here[2] ?? here[3]
+      const quotedTag = here[1] != null || here[2] != null
+      cur += here[0]
+      i += here[0].length
+      // the body starts after the rest of THIS line
+      const nl = src.indexOf('\n', i)
+      if (nl === -1) return null // heredoc announced but no body -> cannot resolve
+      cur += src.slice(i, nl + 1)
+      i = nl + 1
+      // find the terminator line (leading tabs allowed for <<-)
+      const endRx = new RegExp(`^[ \\t]*${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[ \\t]*$`, 'm')
+      const rel = endRx.exec(src.slice(i))
+      if (!rel) return null // unterminated heredoc
+      const body = src.slice(i, i + rel.index)
+      if (!quotedTag && /\$\(|`/.test(body)) return null // unquoted tag expands the body
+      cur += blank(body) + rel[0]
+      i += rel.index + rel[0].length
+      continue
+    }
+
+    if (c === "'") { // literal until the next ' -- a backslash is NOT special here
+      const end = src.indexOf("'", i + 1)
+      if (end === -1) return null
+      cur += blank(src.slice(i, end + 1)); i = end + 1; continue
+    }
+
+    if (c === '$' && src[i + 1] === "'") { // ANSI-C: \' does escape
+      let j = i + 2
+      while (j < src.length && src[j] !== "'") { j += src[j] === '\\' ? 2 : 1 }
+      if (j >= src.length) return null
+      cur += blank(src.slice(i, j + 1)); i = j + 1; continue
+    }
+
+    if (c === '"') {
+      let j = i + 1
+      while (j < src.length && src[j] !== '"') { j += src[j] === '\\' ? 2 : 1 }
+      if (j >= src.length) return null
+      const inner = src.slice(i + 1, j)
+      if (/\$\(|`/.test(inner)) return null // may run a command -> not inert
+      cur += blank(src.slice(i, j + 1)); i = j + 1; continue
+    }
+
+    cur += c; i++
+  }
+  return cur
 }
 
 // Blank out curl/HTTP DATA-PAYLOAD arguments before self-pace matching. A -d /
@@ -165,6 +325,27 @@ export function stripGitCommitMessages(command) {
   )
 }
 
+// Normalise two shell-level obfuscations that bash resolves at EXEC time, so an
+// invocation whose SHAPE is a real self-pace cannot dodge the slash-command match
+// with quoting the shell undoes anyway. Measured end-to-end through the gate hook
+// (upstream review, 2026-07-27): `claude \/loop` and `claude$IFS/loop` BOTH run
+// `claude /loop` in bash but slipped the `(?:^|[\s'"])\/loop` match -- the char
+// before `/loop` was `\` and `S` (end of `$IFS`), neither in the [\s'"] class.
+// The fix is NOT to widen that class (that would let more prose through); it is to
+// resolve what the shell resolves before matching: `$IFS`/`${IFS}` word-splits to
+// a space, and a backslash escape `\X` collapses to `X`. Side effect: also closes
+// `claude /lo\op`. Applied ONLY to the self-pace bash patterns below; the
+// scheduler/store/API checks keep the raw segment (upstream measured them clean,
+// and this PR is scoped to these two loop regressions). This cannot introduce a
+// false positive: collapsing escapes / dropping `$IFS` never synthesises the
+// literal `tmux`+send-keys, `nohup`+claude, or `claude`+`/loop` tokens out of
+// prose -- it only removes an evasion.
+export function normalizeShellEvasion(seg) {
+  return String(seg ?? '')
+    .replace(/\$\{IFS\}|\$IFS\b/g, ' ') // $IFS / ${IFS} -> the space it expands to
+    .replace(/\\(.)/g, '$1') // \X -> X (bash unescape of a backslash-escaped char)
+}
+
 // Pure decision: does this tool call set up self-pace / self-injection?
 export function gateDecision(toolName, toolInput) {
   const name = String(toolName ?? '')
@@ -185,14 +366,31 @@ export function gateDecision(toolName, toolInput) {
     const safeCommand = stripDataPayloads(stripGitCommitMessages(String(toolInput?.command ?? '')))
     // Per-segment so an unrelated token elsewhere in a compound command cannot
     // turn a legit read (store inspection, schedule-API GET) into a false deny.
-    for (const seg of splitSegments(safeCommand)) {
-      if (SELF_PACE_BASH_PATTERNS.some((re) => re.test(seg))) return { deny: true }
-      // scheduler binaries: deny the exec/submit forms, allow pure read-listing
-      if (SCHEDULER_RX.test(seg) && !SCHEDULER_READ_RX.test(seg)) return { deny: true }
+    const naiveSegs = splitSegments(safeCommand)
+    for (const seg of naiveSegs) {
+      // Match the self-pace bash patterns against the shell-normalised segment so a
+      // `\/loop` / `$IFS/loop` evasion (which bash resolves to `/loop` at exec) is
+      // still caught; the scheduler/store/API checks below use the RAW seg (scoped).
+      //
+      // These stay on the NAIVE segments ON PURPOSE. They are unanchored, so a
+      // quoted region is not a hiding place for them -- and the naive scan is
+      // what catches a real `subprocess.run(['tmux','send-keys',...])` inside a
+      // heredoc body (measured 2026-08-05). Quote-aware segments here would have
+      // dropped the detection of this gate's own founding incident vector.
+      if (SELF_PACE_BASH_PATTERNS.some((re) => re.test(normalizeShellEvasion(seg)))) return { deny: true }
       // self-schedule store: block WRITE only (a read/grep is legit diagnostics)
       if (SCHEDULE_STORE_RX.test(seg) && WRITE_INTENT_RX.test(seg)) return { deny: true }
       // dashboard schedule API: block WRITE methods only (GET list/pending is legit)
       if (SCHEDULE_API_RX.test(seg) && HTTP_WRITE_RX.test(seg)) return { deny: true }
+    }
+    // The scheduler check is the ANCHORED one -- it fires on what sits at a
+    // segment START -- so it is the one a fake segment boundary can mislead, and
+    // the only one that gets quote-aware segments. Null (unresolvable quoting)
+    // falls back to the naive split, i.e. to scanning strictly more.
+    const masked = maskInertLiterals(safeCommand)
+    for (const seg of (masked == null ? naiveSegs : splitSegments(masked))) {
+      // scheduler binaries: deny the exec/submit forms, allow pure read-listing
+      if (SCHEDULER_RX.test(seg) && !SCHEDULER_READ_RX.test(seg)) return { deny: true }
     }
   }
   return { deny: false }

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync
 import { join } from 'node:path'
 import { homedir, userInfo } from 'node:os'
 import { createHash } from 'node:crypto'
-import { resolveFromPath } from '../platform.js'
+import { resolveFromPath, tryResolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT, DEFAULT_AGENT_MODEL } from '../config.js'
 import {
@@ -14,6 +14,7 @@ import {
   hasFleetOauthToken,
   FLEET_OAUTH_TOKEN_PATH,
 } from './agent-process.js'
+import { withSessionSendLock } from './session-send-lock.js'
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
 import { detectPaneState } from '../pane-state.js'
 import { notifyChannel } from '../notify.js'
@@ -87,20 +88,48 @@ export function makeWorkerCtx(session: string, homeDir: string): WorkerCtx {
   }
 }
 
+/**
+ * Default worker home for an agent id. Derived from MAIN_AGENT_ID exactly like
+ * the session name (WORKERHOME1): a sandbox or renamed install booted with its
+ * own MAIN_AGENT_ID must never resolve to -- and write into -- the default
+ * install's live worker config dir (the 2026-07-28 same-host sandbox boot
+ * seeded credentials into the live ~/.marveen-worker/.claude-config this way).
+ * The default id 'marveen' keeps the historical .marveen-worker path, so
+ * existing installs see no migration and their Keychain path-hash
+ * (configDirKeychainService) is unchanged; any other id derives its own dir,
+ * which hashes to its own Keychain service automatically.
+ */
+export function workerHomeFor(agentId: string, variant: 'slow' | 'fast'): string {
+  return join(homedir(), `.${agentId}-worker${variant === 'fast' ? '-fast' : ''}`)
+}
+
+/**
+ * WEB_ONLY=true marks a staging/preview instance that must not touch the live
+ * fleet. The boot-time pre-start in web.ts is already gated, but the worker
+ * also LAZY-starts from runViaWorker (scaffold generation, heartbeat, digest),
+ * which is how a WEB_ONLY sandbox still created live tmux sessions and wrote
+ * into worker config dirs (WORKERHOME1). Read at call time, pure, so the gate
+ * is unit-testable and follows env changes in tests.
+ */
+export function workerStartAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env['WEB_ONLY'] !== 'true'
+}
+
 // Slow session: long-running tasks (analysis, reports, search). The original
-// worker -- all existing callers default to this. Session name keys off
-// MAIN_AGENT_ID (per #611) so notify.sh's "${MAIN_AGENT_ID}-worker" branch
-// matches on renamed installs; default installs stay "marveen-worker". The
-// WORKER_DIR stays fixed (.marveen-worker) -- the config-dir hash depends on it.
+// worker -- all existing callers default to this. Session name AND worker home
+// key off MAIN_AGENT_ID (per #611 + WORKERHOME1) so notify.sh's
+// "${MAIN_AGENT_ID}-worker" branch matches on renamed installs and a non-default
+// id gets its own isolated home; default installs stay "marveen-worker" /
+// ~/.marveen-worker (byte-identical to the historical fixed path).
 const ctxSlow = makeWorkerCtx(
   process.env.MARVEEN_WORKER_SESSION || `${MAIN_AGENT_ID}-worker`,
-  process.env.MARVEEN_WORKER_DIR || join(homedir(), '.marveen-worker'),
+  process.env.MARVEEN_WORKER_DIR || workerHomeFor(MAIN_AGENT_ID, 'slow'),
 )
 // Fast session: short, conversational tasks (< 300 chars, no analysis keywords).
 // Separate home + config dir eliminates any shared state with the slow session.
 const ctxFast = makeWorkerCtx(
   process.env.MARVEEN_WORKER_SESSION_FAST || `${MAIN_AGENT_ID}-worker-fast`,
-  process.env.MARVEEN_WORKER_DIR_FAST || join(homedir(), '.marveen-worker-fast'),
+  process.env.MARVEEN_WORKER_DIR_FAST || workerHomeFor(MAIN_AGENT_ID, 'fast'),
 )
 
 // --- Message priority routing -------------------------------------------------
@@ -430,6 +459,12 @@ function sleepMs(ms: number): Promise<void> {
  * the Write-to-scratch capture works. Idempotent.
  */
 function startWorkerSessionFor(ctx: WorkerCtx): void {
+  // Gate BEFORE any side effect: in WEB_ONLY staging neither the tmux session
+  // nor the ensureWorkerCwd config-dir writes may happen (WORKERHOME1).
+  if (!workerStartAllowed()) {
+    logger.warn({ session: ctx.session }, 'agent-worker: WEB_ONLY mode -- refusing to start a worker session or write its config dir')
+    return
+  }
   if (workerSessionExists(ctx)) return
   ensureWorkerCwd(ctx)
   // Detached session; launch claude via a login shell so PATH + the config-dir
@@ -437,14 +472,36 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
   // Fleet setup-token (when present) via $(cat) at launch so the secret never
   // lands in argv/`ps` -- same pattern as startAgentProcess. Keeps the worker
   // on the stable token instead of the shared rotating credentials file.
+  // Launch claude by RESOLVED absolute path, not by bare name: `bash -lc` gets
+  // the login-shell PATH, which on stock Debian/Ubuntu roots does NOT include
+  // ~/.local/bin (the native installer's default target). The channels session
+  // launcher already compensates; the bare `claude` here made the worker die
+  // within seconds of every boot on such Linux installs (command not found,
+  // measured on vps47 during the WORKERHOME1 cold-start probe: session created,
+  // gone before the first 5s poll). tryResolveFromPath probes the known install
+  // dirs; fall back to the bare name so an exotic layout keeps the old behavior.
+  const claudeLaunchBin = tryResolveFromPath('claude') ?? 'claude'
   const launch =
     (hasFleetOauthToken() ? `export CLAUDE_CODE_OAUTH_TOKEN="$(cat ${shArg(FLEET_OAUTH_TOKEN_PATH)})"; ` : '') +
     `export CLAUDE_CONFIG_DIR=${shArg(ctx.configDir)}; ` +
     `cd ${shArg(ctx.home)} && ` +
-    `claude --dangerously-skip-permissions --model ${shArg(WORKER_MODEL)}`
+    `${shArg(claudeLaunchBin)} --dangerously-skip-permissions --model ${shArg(WORKER_MODEL)}`
   execFileSync(TMUX, ['new-session', '-d', '-s', ctx.session, '-c', ctx.home, 'bash', '-lc', launch], { timeout: 8000 })
   logger.info({ session: ctx.session, cwd: ctx.home }, 'agent-worker: launched interactive worker session')
   logWorkerClaudeVersion(ctx)
+}
+
+/**
+ * The worker sessions the boot pre-start creates, and a liveness probe for
+ * them. Exported for the liveness monitor (WORKERBOOT1): nothing watched these
+ * sessions, so a death went unrecorded and the cause stayed unknowable.
+ */
+export function workerContexts(): WorkerCtx[] {
+  return [ctxSlow, ctxFast]
+}
+
+export function isWorkerSessionAlive(session: string): boolean {
+  return sessionExistsOnHost(null, session)
 }
 
 /**
@@ -530,6 +587,13 @@ function alertWorkerStuck(ctx: WorkerCtx, paneTail: string): void {
 }
 
 async function ensureWorkerReady(ctx: WorkerCtx): Promise<boolean> {
+  // Fail fast in WEB_ONLY: without this the 90s readiness poll would spin on a
+  // session that the gated start never created, then alertWorkerStuck would
+  // notifyChannel the LIVE channel from a staging instance.
+  if (!workerStartAllowed()) {
+    logger.warn({ session: ctx.session }, 'agent-worker: WEB_ONLY mode -- worker disabled, failing the request fast')
+    return false
+  }
   startWorkerSessionFor(ctx)
   const start = Date.now()
   const deadline = start + WORKER_BOOT_TIMEOUT_MS
@@ -548,6 +612,13 @@ async function ensureWorkerReady(ctx: WorkerCtx): Promise<boolean> {
 }
 
 function restartWorkerSession(ctx: WorkerCtx): void {
+  // Defense-in-depth (WORKERHOME1): every WEB_ONLY-reachable path is already
+  // gated upstream, but a restart here would kill-session a LIVE worker from a
+  // staging instance -- never do that.
+  if (!workerStartAllowed()) {
+    logger.warn({ session: ctx.session }, 'agent-worker: WEB_ONLY mode -- refusing to restart (kill) a worker session')
+    return
+  }
   try { execFileSync(TMUX, ['kill-session', '-t', ctx.session], { timeout: 5000 }) } catch { /* not running */ }
   try { startWorkerSessionFor(ctx) } catch (err) { logger.warn({ err, session: ctx.session }, 'agent-worker: restart failed') }
 }
@@ -592,8 +663,18 @@ async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: numb
   const donePath = join(ctx.scratchDir, `${reqId}.done`)
   for (const p of [outPath, donePath]) { try { rmSync(p, { force: true }) } catch { /* none */ } }
 
-  clearWorkerContext(ctx)
-  await sendPromptToSession(ctx.session, buildWorkerPrompt(message, outPath, donePath))
+  // PANEWRITERS805: /clear + prompt-send is ONE atomic delivery. Unlocked, the
+  // /clear could eat another writer's in-flight text, and a writer slipping in
+  // between the clear and our send would land its text into the freshly
+  // cleared context ahead of ours. Deliver mode (not recover): a dispatch must
+  // deliver; on a wedged holder we fail open past the budget, logged.
+  const sendRes = await withSessionSendLock(ctx.session, null, 'deliver', async () => {
+    clearWorkerContext(ctx)
+    await sendPromptToSession(ctx.session, buildWorkerPrompt(message, outPath, donePath), null, { lockMode: 'held' })
+  })
+  if (sendRes.failedOpen) {
+    logger.warn({ session: ctx.session, reqId }, 'agent-worker: dispatch ran without the send lane (fail-open past wait budget)')
+  }
 
   const start = Date.now()
   try {

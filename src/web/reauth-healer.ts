@@ -10,6 +10,7 @@ import { resolveAgentSession } from './channel-mcp-reconnect.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { detectReauthNeeded } from './reauth-detect.js'
 import { loginSequence, literalKeyArgs, specialKeyArgs } from './tmux-keys.js'
+import { withSessionSendLock } from './session-send-lock.js'
 
 // Autonomous re-auth healer (Adam stability-fix #1, scoped 2026-06-03).
 //
@@ -35,7 +36,11 @@ const NOTIFY_SCRIPT = join(PROJECT_ROOT, 'scripts', 'notify.sh')
 const PROBE_INTERVAL_MS = 3 * 60 * 1000 // 3 min
 const INITIAL_DELAY_MS = 90_000         // after boot-grace, offset from other watchers
 const DEAD_PROBE_THRESHOLD = 3          // ~9 min of consecutive dead-token probes before acting
-const ESCALATION_COOLDOWN_MS = 30 * 60 * 1000 // 1 alert / agent / 30 min (re-alerts if still dead)
+// Repeat-alert cadence for a still-dead token. The first escalation is what
+// matters; every re-alert after it carries no new information, so keep it rare
+// (owner request 2026-07-30: "elég pár óránként jelezni" -- a 30 min cadence
+// produced ~10 identical alerts in one morning).
+const ESCALATION_COOLDOWN_MS = 3 * 60 * 60 * 1000 // 1 alert / agent / 3h (re-alerts if still dead)
 
 export interface ReauthHealerState {
   consecutiveDead: number
@@ -147,14 +152,23 @@ function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout
 // Fire-and-forget best-effort /login into a sub-agent session. Reuses the same
 // scripted sequence as the dashboard button (loginSequence('start')).
 async function sendBestEffortLogin(session: string): Promise<void> {
-  for (const step of loginSequence('start')) {
-    const args = step.kind === 'literal' ? literalKeyArgs(session, step.text) : specialKeyArgs(session, step.key)
-    if (args) {
-      await new Promise<void>((resolve) => {
-        execFile(TMUX, args, { timeout: 5000 }, () => resolve())
-      })
+  // PANEWRITERS805: the /login sequence is direct keystrokes into a pane that
+  // also receives locked deliveries. Recover-mode (fail-closed): a busy lane
+  // means a delivery is mid-chunk-stream and our keys would splice into its
+  // framed text. Skip and log; the healer's own sweep cadence retries.
+  const res = await withSessionSendLock(session, null, 'recover', async () => {
+    for (const step of loginSequence('start')) {
+      const args = step.kind === 'literal' ? literalKeyArgs(session, step.text) : specialKeyArgs(session, step.key)
+      if (args) {
+        await new Promise<void>((resolve) => {
+          execFile(TMUX, args, { timeout: 5000 }, () => resolve())
+        })
+      }
+      if (step.delayMs > 0) await sleep(step.delayMs)
     }
-    if (step.delayMs > 0) await sleep(step.delayMs)
+  })
+  if (!res.ran) {
+    logger.info({ session }, 'reauth-healer: /login send-keys skipped -- a delivery is in flight into this pane (fail-closed); next sweep retries')
   }
 }
 
