@@ -23,6 +23,7 @@ import { logger } from '../logger.js'
 import { PROJECT_ROOT } from '../config.js'
 import { readEnvFile } from '../env.js'
 import { resolveOwnerChatId } from '../owner-chat.js'
+import { checkBotTokenHealth } from './bot-token-health.js'
 
 // Mirrors KEEPALIVE_RESPAWN_GRACE_MS from channel-monitor.ts (15 min).
 // Not imported directly to avoid a circular module dependency: channel-monitor.ts
@@ -293,7 +294,7 @@ function spawnProber(): void {
 }
 
 // N5: renamed doInboundProbeCheck → checkInboundProbeDeafness (match check* convention)
-function checkInboundProbeDeafness(probeTimeoutMs: number): void {
+async function checkInboundProbeDeafness(probeTimeoutMs: number): Promise<void> {
   // Session file absent — safe no-op.
   if (!existsSync(SESSION_FILE)) return
 
@@ -314,6 +315,18 @@ function checkInboundProbeDeafness(probeTimeoutMs: number): void {
   })
 
   if (!needsRespawn) return
+  // Fork-only Tier 2 back-off guard: verify Telegram is reachable and the bot token
+  // is valid before burning a hard-restart on a futile respawn.
+  const botToken = readEnvFile(['TELEGRAM_BOT_TOKEN'])['TELEGRAM_BOT_TOKEN'] ?? ''
+  const health = await checkBotTokenHealth(botToken)
+  if (!health.ok) {
+    if (health.statusCode === 401 || health.statusCode === 403) {
+      logger.error({ statusCode: health.statusCode }, 'Bot token invalid or revoked -- skipping respawn')
+    } else {
+      logger.warn({ statusCode: health.statusCode }, 'Telegram API unreachable -- deferring respawn to next tick')
+    }
+    return
+  }
 
   // Lazy import to avoid circular dependency at module load time.
   // B2: also import lastMainRespawnAt to enforce cross-path grace (an inbound-probe
@@ -379,7 +392,7 @@ export function startInboundProber(): void {
   setInterval(() => {
     try {
       spawnProber()
-      checkInboundProbeDeafness(probeIntervalMs * PROBE_TIMEOUT_MULTIPLIER)
+      void checkInboundProbeDeafness(probeIntervalMs * PROBE_TIMEOUT_MULTIPLIER).catch((err) => logger.error({ err }, 'Inbound probe deafness check failed'))
     } catch (err) {
       logger.error({ err }, 'Inbound probe check tick failed')
     }
@@ -389,4 +402,4 @@ export function startInboundProber(): void {
 }
 
 // Fork-only (latnaborsodi): re-export so existing tests/importers keep working.
-export { checkBotTokenHealth } from './bot-token-health.js'
+export { checkBotTokenHealth }
