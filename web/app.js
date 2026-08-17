@@ -15300,9 +15300,30 @@ function openTerminalModal(agentName) {
   const fitAddon = new window.FitAddon.FitAddon()
   term.loadAddon(fitAddon)
   term.open(container)
-  fitAddon.fit()
   terminalInstance = term
   terminalFit = fitAddon
+
+  // The server-side tmux window doesn't auto-track this xterm viewport (it's
+  // fed via `capture-pane` snapshots, not a real attached PTY), so it keeps
+  // whatever size it was created with -- commonly 80x24. Left alone, that
+  // shows up as a pane that only fills a slice of the modal (dead space below
+  // the prompt) and "scrollback" that can't reach further back, because there
+  // genuinely isn't more captured content, not because scrolling is broken.
+  // Tell the server our computed size after every fit() so the tmux window
+  // tracks the actual viewport; dedupe so we don't spam resize-window calls.
+  let lastSentSize = null
+  const syncServerSize = () => {
+    const cols = term.cols, rows = term.rows
+    if (!cols || !rows) return
+    if (lastSentSize && lastSentSize.cols === cols && lastSentSize.rows === rows) return
+    lastSentSize = { cols, rows }
+    fetch(`/api/agents/${encodeURIComponent(agentName)}/resize`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cols, rows }),
+    }).catch(() => {})
+  }
+  fitAddon.fit()
+  syncServerSize()
 
   openModal(overlay)
   setTimeout(() => term.focus(), 50)
@@ -15380,7 +15401,7 @@ function openTerminalModal(agentName) {
   let fitTimer = null
   const ro = new ResizeObserver(() => {
     clearTimeout(fitTimer)
-    fitTimer = setTimeout(() => { try { fitAddon.fit() } catch {} }, 50)
+    fitTimer = setTimeout(() => { try { fitAddon.fit(); syncServerSize() } catch {} }, 50)
   })
   const modalEl = container.closest('.terminal-modal') || container.parentElement
   if (modalEl) ro.observe(modalEl)

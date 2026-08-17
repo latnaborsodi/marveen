@@ -165,6 +165,44 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
     return true
   }
 
+  // --- pane resize -------------------------------------------------------
+  // The dashboard pane stream is `tmux capture-pane`, NOT a real attached PTY,
+  // so the tmux window keeps whatever size it happened to be created with
+  // (commonly the 80x24 tmux default) no matter how big the browser's xterm.js
+  // viewport is. The TUI inside redraws to fill the window it's given, so a
+  // stale small window means capture-pane only ever returns a ~24-line slice --
+  // which reads as two separate bugs in the dashboard (empty space under the
+  // prompt, and "scrolling doesn't reach older lines") but is really one: there
+  // is no more content to show because the window itself never grew. The
+  // frontend calls this after every fitAddon.fit() with its computed cols/rows
+  // so the tmux window tracks the actual viewport size.
+  const resizeMatch = path.match(/^\/api\/agents\/([^/]+)\/resize$/)
+  if (resizeMatch && method === 'POST') {
+    const name = decodeURIComponent(resizeMatch[1])
+    const target = resolveTarget(name)
+    if (!target.exists) { json(res, { error: 'Agent not found' }, 404); return true }
+    if (!target.running) { json(res, { error: 'Agent is not running' }, 400); return true }
+    const body = await readBody(ctx.req)
+    let parsed: { cols?: unknown; rows?: unknown }
+    try { parsed = JSON.parse(body.toString()) } catch { json(res, { error: 'Invalid JSON' }, 400); return true }
+    const cols = Math.round(Number(parsed.cols))
+    const rows = Math.round(Number(parsed.rows))
+    // Clamp to sane bounds -- a broken/hostile client shouldn't be able to
+    // ask tmux for a 1x1 or a 5000x5000 window.
+    if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols < 20 || cols > 500 || rows < 5 || rows > 200) {
+      json(res, { error: 'cols/rows out of range' }, 400)
+      return true
+    }
+    try {
+      await tmux(['resize-window', '-t', target.session, '-x', String(cols), '-y', String(rows)])
+      json(res, { ok: true, cols, rows })
+    } catch (err) {
+      logger.warn({ err, name, cols, rows }, 'agent-terminal: resize-window failed')
+      json(res, { error: 'resize failed' }, 500)
+    }
+    return true
+  }
+
   // --- keystroke injection ---------------------------------------------
   const keysMatch = path.match(/^\/api\/agents\/([^/]+)\/keys$/)
   if (keysMatch && method === 'POST') {
