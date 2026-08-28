@@ -1650,6 +1650,15 @@ SYSTEMD_DIR="$HOME/.config/systemd/user"
 mkdir -p "$SYSTEMD_DIR"
 
 NODE_PATH="$(which node)"
+# The unit's own Environment=PATH (below) needs node's directory too, not just
+# NODE_PATH for ExecStart: ensure-native-modules.sh (ExecStartPre on the
+# dashboard/channels units) shells out to bare `node`/`npm`, and on an
+# nvm-managed install neither lives in /usr/bin -- without this the rebuild
+# guard silently fails every start ("node: command not found"), logged but
+# non-fatal (ensure-native-modules.sh always exits 0), so it can hide for a
+# long time (found 2026-08-28 while investigating an unrelated channel-crash
+# report; the crash itself was NOT reproduced as caused by this).
+NODE_BIN_DIR="$(dirname "$NODE_PATH")"
 # Unit names key off SERVICE_ID. SERVICE_ID == MAIN_AGENT_ID for a brand-unaware
 # (default) install, so these unit names are unchanged unless the operator chose
 # a distinct brand above. The channels unit still runs channels.sh, which names
@@ -1702,7 +1711,7 @@ RestartSec=5
 LimitNOFILE=16384
 StandardOutput=append:$INSTALL_DIR/store/dashboard.log
 StandardError=append:$INSTALL_DIR/store/dashboard.error.log
-Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$NODE_BIN_DIR:$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 ${TZ_LINE}
 
@@ -1749,7 +1758,7 @@ Restart=always
 RestartSec=10
 StandardOutput=append:$INSTALL_DIR/store/channels.log
 StandardError=append:$INSTALL_DIR/store/channels.error.log
-Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$NODE_BIN_DIR:$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 Environment=USER=$USER
 Environment=TERM=xterm-256color
@@ -1769,7 +1778,7 @@ Description=${BOT_NAME} Reggeli Napindito
 Type=oneshot
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/scripts/morning-briefing.sh
-Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$NODE_BIN_DIR:$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 ${TZ_LINE}
 EOF

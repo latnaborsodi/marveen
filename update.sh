@@ -427,9 +427,49 @@ migrate_channels_restart() {
   return 0
 }
 
+# Node-bin-in-PATH migration (Linux only). ensure-native-modules.sh (the
+# ExecStartPre rebuild guard on the dashboard/channels units) shells out to
+# bare `node`/`npm`; on an nvm-managed install neither lives under /usr/bin,
+# so the guard has been silently failing every start ("node: command not
+# found", logged to *.error.log but non-fatal -- ensure-native-modules.sh
+# always exits 0, which is why this went unnoticed). The installer template
+# now bakes the install-time node dir into Environment=PATH (2026-08-28);
+# this migration lands the same fix on hosts installed before that, since
+# update.sh does not re-run the installer. Idempotent: skips units that
+# already carry a PATH with more than the fixed installer set, and no-ops if
+# `node` isn't resolvable right now either.
+migrate_unit_node_path() {
+  units_dir="${1:-$HOME/.config/systemd/user}"
+  [ -d "$units_dir" ] || return 0
+  _node_path="$(command -v node 2>/dev/null)"
+  [ -n "$_node_path" ] || return 0
+  _node_bin_dir="$(dirname "$_node_path")"
+  _patched=0
+  for unit in "$units_dir/"*-dashboard.service "$units_dir/"*-channels.service "$units_dir/"*-morning.service; do
+    [ -f "$unit" ] || continue
+    _path_line="$(grep '^Environment=PATH=' "$unit" 2>/dev/null | head -1)"
+    [ -n "$_path_line" ] || continue
+    case ":${_path_line#Environment=PATH=}:" in
+      *":$_node_bin_dir:"*) continue ;;  # already present
+    esac
+    if sed -i.marveen-bak "s#^Environment=PATH=#Environment=PATH=${_node_bin_dir}:#" "$unit" 2>/dev/null; then
+      rm -f "${unit}.marveen-bak"
+      _patched=1
+      echo -e "  Unit PATH javitva (node bin hozzaadva): $(basename "$unit")"
+    else
+      echo -e "  FIGYELEM: a unit nem volt irhato: $unit"
+    fi
+  done
+  if [ "$_patched" = "1" ]; then
+    systemctl --user daemon-reload 2>/dev/null || true
+  fi
+  return 0
+}
+
 run_unit_maintenance() {
   repair_morning_timer "$@"
   migrate_channels_restart "$@"
+  migrate_unit_node_path "$@"
   return 0
 }
 run_unit_maintenance
