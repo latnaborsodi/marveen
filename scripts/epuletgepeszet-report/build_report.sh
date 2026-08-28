@@ -1,6 +1,9 @@
 #!/bin/bash
 # Epuletgepeszet napi hianycikk-jelentes -- osszeallito.
-# Meg NEM kuld emailt es NEM ütemezett -- kezi futtatasra, ellenorzesre.
+# Ez a script csak a report.json-t allitja ossze (nem formaz emailt, nem kuld).
+# Az email formazasa (format_email.py) es kuldese (mcp__email__send_email) a
+# hivo felelossege -- kezi futtatasnal ellenorzesre, ütemezett futasnal (07:45,
+# Donat + Milan jovahagyva 2026-08-28) a napi feladat promptjaban.
 #
 # Hasznalat: bash scripts/epuletgepeszet-report/build_report.sh [--skip-refresh]
 #   --skip-refresh: kihagyja a scrape-single celzott frissitest (gyorsabb teszt,
