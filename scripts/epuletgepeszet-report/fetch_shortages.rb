@@ -44,7 +44,8 @@ OptionParser.new { |o| o.on('--out FILE') { |v| out_path = v } }.parse!(ARGV)
 sql = <<~SQL
   SELECT mf.mkod, mf.datum, mf.megnev AS vevo_nev,
          CASE WHEN mf.ocid3 IS NOT NULL AND mf.ocid3 <> 0 THEN 'OC3' ELSE 'kezi' END AS forras,
-         ml.tkod, c.megnev AS termek_nev, (ml.menny - ml.szalliton) AS hianyzo_mennyiseg
+         ml.tkod, c.megnev AS termek_nev, (ml.menny - ml.szalliton) AS hianyzo_mennyiseg,
+         ml.ar AS eladasi_ar_netto
   FROM megrendfej mf
   JOIN megrendlab ml ON ml.mkod = mf.mkod
   JOIN cikk c ON c.tkod = ml.tkod
@@ -88,14 +89,21 @@ rows.each do |r|
   tkod = fix_enc(r['tkod'])
   termek_nev = fix_enc(r['termek_nev'])
   menny = r['hianyzo_mennyiseg'].to_f
+  # A megrendelesen szereplo netto eladasi egysegar (megrendlab.ar) -- Milan
+  # kerese (2026-08-28 21:08): a beszerzo azonnal lassa, milyen ar ALATT kell
+  # beszerezni, hogy maradjon arres. Rendelesenkent (nem termekenkent) lehet
+  # eltero, ezert soronkent adjuk at, es a termek-osszesitonel tartomanykent.
+  eladasi_ar = r['eladasi_ar_netto'] ? r['eladasi_ar_netto'].to_f : nil
   orders[mkod]['sorok'] << {
     'tkod' => tkod,
     'termek_nev' => termek_nev,
     'hianyzo_mennyiseg' => menny,
+    'eladasi_ar_netto' => eladasi_ar,
   }
-  pt = (product_totals[tkod] ||= { 'tkod' => tkod, 'termek_nev' => termek_nev, 'osszes_hianyzo_mennyiseg' => 0.0, 'rendelesek' => 0 })
+  pt = (product_totals[tkod] ||= { 'tkod' => tkod, 'termek_nev' => termek_nev, 'osszes_hianyzo_mennyiseg' => 0.0, 'rendelesek' => 0, 'eladasi_arak' => [] })
   pt['osszes_hianyzo_mennyiseg'] += menny
   pt['rendelesek'] += 1
+  pt['eladasi_arak'] << eladasi_ar if eladasi_ar
 end
 
 # RS3 sajat beszerzesi elozmeny -- bevet + bevetlab (TENYLEGES bevetelezes,
@@ -130,6 +138,9 @@ end
 
 product_totals.each_value do |pt|
   pt['rs3_beszerzesi_elozmeny'] = rs3_purchase_history(pt['tkod'])
+  arak = pt.delete('eladasi_arak')
+  pt['eladasi_ar_netto_min'] = arak.min
+  pt['eladasi_ar_netto_max'] = arak.max
 end
 
 result = {

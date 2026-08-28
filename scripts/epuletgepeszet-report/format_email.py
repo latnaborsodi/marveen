@@ -62,7 +62,10 @@ def main():
         out.append("")
         out.append(f"Rendelés {r['mkod']} | {r['datum']} | {r['vevo_nev']} ({r['forras']}){cimke}")
         for s in r["sorok"]:
-            out.append(f"  * {s['tkod']} | {s['termek_nev']} | hiányzik: {s['hianyzo_mennyiseg']:g}")
+            ar_txt = (f"{float(s['eladasi_ar_netto']):,.0f} Ft".replace(",", " ")
+                      if s.get("eladasi_ar_netto") is not None else "nincs ár a rendelésen")
+            out.append(f"  * {s['tkod']} | {s['termek_nev']} | hiányzik: {s['hianyzo_mennyiseg']:g} "
+                       f"| eladási ár (megrendelésen): {ar_txt}")
             if not s["van_forras"]:
                 out.append("      (nincs ismert beszerzési forrás a beszállítói adatbázisból)")
             else:
@@ -78,6 +81,15 @@ def main():
         out.append(f"{p['tkod']} | {p['termek_nev']}")
         out.append(f"  Összes hiányzó mennyiség: {p['osszes_hianyzo_mennyiseg']:g} "
                     f"({p['erintett_rendelesek']} rendelésen)")
+        ar_min, ar_max = p.get("eladasi_ar_netto_min"), p.get("eladasi_ar_netto_max")
+        if ar_min is None:
+            ar_line = "nincs ár a rendeléseken"
+        elif ar_min == ar_max:
+            ar_line = f"{float(ar_min):,.0f} Ft".replace(",", " ")
+        else:
+            ar_line = (f"{float(ar_min):,.0f} - {float(ar_max):,.0f} Ft"
+                       .replace(",", " "))
+        out.append(f"  Eladási ár (megrendeléseken): {ar_line}")
         if not p["van_forras"]:
             out.append("  (nincs ismert beszerzési forrás a beszállítói adatbázisból)")
         else:
