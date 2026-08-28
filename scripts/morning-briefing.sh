@@ -33,17 +33,39 @@ echo "=== Reggeli napindító $(date) ===" >> "$LOG"
 
 cd "$INSTALL_DIR"
 
-if $CLAUDE --dangerously-skip-permissions \
-  --channels plugin:telegram@claude-plugins-official \
-  -p "Reggeli napindító - készítsd el és küld el Telegramra (chat_id: $CHAT_ID).
+[ -z "$TELEGRAM_BOT_TOKEN" ] && echo "ERROR: TELEGRAM_BOT_TOKEN nincs beállítva (.env)" >> "$LOG" 2>&1 && exit 1
 
-1. Email check: search_emails az elmúlt 12 órából, szűrd ki a spam/promo emaileket
-2. Naptár: list-events a mai napra a $CALENDAR_ID naptárból (Europe/Budapest timezone)
+BRIEFING="$($CLAUDE --dangerously-skip-permissions \
+  --settings '{"enabledPlugins":{"telegram@claude-plugins-official":false}}' \
+  -p "Reggeli napindító - állítsd össze az üzenet SZÖVEGÉT (ne küldd el, ne használj semmilyen Telegram/reply toolt -- a végső szöveget add vissza válaszként, ez kerül kiküldésre).
+
+1. Email check: ha nem érhető el azonnal, ToolSearch-csel keresd meg a connect_all és get_unseen_messages eszközöket (email MCP). Hívd meg előbb a connect_all-t, utána a get_unseen_messages-t -- szűrd ki a spam/promo emaileket
+2. Naptár: ha nem érhető el azonnal, ToolSearch-csel keresd meg a 'calendar' kulcsszóra a Google Calendar MCP list_events eszközét (a tool neve alahúzásos: list_events, nem list-events). Ha megtalálod, kérdezd le a mai nap eseményeit a(z) $CALENDAR_ID naptárból (Europe/Budapest timezone). Ha a ToolSearch után sem található ilyen eszköz, egyszerűen HAGYD KI a naptár blokkot a végleges szövegből -- ne írj arról semmit, hogy a naptár nincs bekötve vagy nem elérhető, ez a lépés ilyenkor néma legyen
 3. AI hírek: WebSearch \"AI news [tegnapi dátum]\"
-4. Küld el Telegramra a reply tool-lal (chat_id: $CHAT_ID)
 
-Tömör, lényegre törő. Ékezetesen írj magyarul." >> "$LOG" 2>&1; then
-  echo "$TODAY" > "$STAMP"
+Tömör, lényegre törő. Ékezetesen írj magyarul. A válaszod KIZÁRÓLAG a kiküldendő üzenet szövege legyen, semmi más (se bevezető, se magyarázat, se markdown code fence).")"
+
+echo "--- Összeállított szöveg ---" >> "$LOG"
+echo "$BRIEFING" >> "$LOG"
+echo "--- vége ---" >> "$LOG"
+
+if [ -z "$BRIEFING" ]; then
+  echo "ERROR: üres briefing szöveg, nem küldöm el" >> "$LOG" 2>&1
+  echo "=== Kész (hiba) $(date) ===" >> "$LOG"
+  exit 1
 fi
 
-echo "=== Kész $(date) ===" >> "$LOG"
+HTTP_CODE="$(curl -s -o "$INSTALL_DIR/store/.morning-send-response.json" -w '%{http_code}' \
+  "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+  --data-urlencode "chat_id=${CHAT_ID}" \
+  --data-urlencode "parse_mode=MarkdownV2" \
+  --data-urlencode "text=${BRIEFING}")"
+
+if [ "$HTTP_CODE" = "200" ]; then
+  echo "$TODAY" > "$STAMP"
+  echo "=== Elküldve (HTTP $HTTP_CODE) $(date) ===" >> "$LOG"
+else
+  echo "ERROR: sendMessage HTTP $HTTP_CODE, válasz: $(cat "$INSTALL_DIR/store/.morning-send-response.json" 2>/dev/null)" >> "$LOG"
+  echo "=== Kész (hiba) $(date) ===" >> "$LOG"
+  exit 1
+fi
