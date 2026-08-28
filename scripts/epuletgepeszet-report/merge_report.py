@@ -14,8 +14,11 @@ def main():
 
     termekek = offers.get("termekek", {})
     forras_nelkul = set(offers.get("forras_nelkul", []))
+    rs3_elozmeny = {p["tkod"]: p.get("rs3_beszerzesi_elozmeny", [])
+                     for p in shortages["termek_osszesito"]}
 
     # 6.1 -- rendelesenkenti bontas: minden sorhoz csatoljuk a beszallitoi ajanlatokat
+    # ES az RS3 sajat utolso 3 beszerzesi tetelet (Milan kerese, 2026-08-28)
     rendelesek = []
     for r in shortages["rendelesek"]:
         sorok = []
@@ -27,6 +30,7 @@ def main():
                 "hianyzo_mennyiseg": s["hianyzo_mennyiseg"],
                 "van_forras": tkod not in forras_nelkul,
                 "beszallitok": termekek.get(tkod, []),
+                "rs3_beszerzesi_elozmeny": rs3_elozmeny.get(tkod, []),
             })
         rendelesek.append({
             "mkod": r["mkod"],
@@ -53,6 +57,7 @@ def main():
             "erintett_rendelesek": p["rendelesek"],
             "van_forras": tkod not in forras_nelkul,
             "beszallitok": beszallitok,
+            "rs3_beszerzesi_elozmeny": p.get("rs3_beszerzesi_elozmeny", []),
         })
 
     report = {

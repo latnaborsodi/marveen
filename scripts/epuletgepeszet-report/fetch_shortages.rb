@@ -98,6 +98,37 @@ rows.each do |r|
   pt['rendelesek'] += 1
 end
 
+# RS3 sajat beszerzesi elozmeny (megrendfejk+megrendlabk, a "k" vegzodesu
+# tablak a beszerzesi/beszallitoi rendelesek, NEM a vevoi megrendfej/megrendlab).
+# Milan kifejezett kerese (2026-08-28 18:47/18:54): az utolso 3 alkalom, kitol
+# es mennyiert vettuk RS3-ban, KULON megjelolve hogy ez RS3-eredetu adat, nem
+# a tebez beszallito-adatbazisbol jon. Kulonosen fontos ott, ahol nincs tebez
+# parositas (35/60 esetben), de mindig szerepeljen ha van ilyen elozmeny.
+def rs3_purchase_history(tkod)
+  esc = tkod.gsub("'", "''")
+  sql = <<~SQL
+    SELECT mf.datum, sz.megnev AS beszallito, ml.ar, ml.menny
+    FROM megrendfejk mf
+    JOIN megrendlabk ml ON ml.mkod = mf.mkod
+    LEFT JOIN szallito sz ON sz.szkod = mf.szkod
+    WHERE ml.tkod = '#{esc}'
+    ORDER BY mf.datum DESC
+    LIMIT 3
+  SQL
+  SuppliersDB::MegbizoConnection.query(sql).map do |r|
+    {
+      'datum' => r['datum']&.strftime('%Y-%m-%d'),
+      'beszallito' => fix_enc(r['beszallito']) || 'ismeretlen (szallito tablaban nincs nev)',
+      'egysegar' => r['ar'],
+      'mennyiseg' => r['menny'],
+    }
+  end
+end
+
+product_totals.each_value do |pt|
+  pt['rs3_beszerzesi_elozmeny'] = rs3_purchase_history(pt['tkod'])
+end
+
 result = {
   'generalva' => now.strftime('%Y-%m-%d %H:%M:%S'),
   'kriterium' => 'thkod=7, archivalva IS NULL, menny-szalliton>0, cikk.szabad<=0',

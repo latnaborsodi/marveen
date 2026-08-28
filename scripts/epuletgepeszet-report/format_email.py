@@ -32,6 +32,19 @@ def render_offer_line(o):
             f"(frissítve: {fmt_date(o['keszlet_frissitve'])})")
 
 
+def render_rs3_history(elozmeny):
+    if not elozmeny:
+        return ["      (RS3 saját beszerzési előzmény: nincs korábbi vásárlás)"]
+    lines = ["      RS3 saját beszerzési előzmény (utolsó 3 alkalom):"]
+    for h in elozmeny:
+        ar = f"{float(h['egysegar']):,.0f} Ft".replace(",", " ") if h.get("egysegar") is not None else "nincs ár"
+        menny = h.get("mennyiseg")
+        menny_txt = f"{float(menny):g} db" if menny is not None else "?"
+        lines.append(f"        * {fmt_date(h.get('datum'))} | {h.get('beszallito') or '?'} | "
+                      f"{ar} | {menny_txt}")
+    return lines
+
+
 def main():
     report = json.load(open(sys.argv[1], encoding="utf-8"))
     out = []
@@ -51,10 +64,11 @@ def main():
         for s in r["sorok"]:
             out.append(f"  * {s['tkod']} | {s['termek_nev']} | hiányzik: {s['hianyzo_mennyiseg']:g}")
             if not s["van_forras"]:
-                out.append("      (nincs ismert beszerzési forrás)")
+                out.append("      (nincs ismert beszerzési forrás a beszállítói adatbázisból)")
             else:
                 for o in s["beszallitok"]:
                     out.append(render_offer_line(o))
+            out.extend(render_rs3_history(s.get("rs3_beszerzesi_elozmeny", [])))
     out.append("")
     out.append("=" * 70)
     out.append("2. TERMÉK-ÖSSZESÍTŐ")
@@ -65,10 +79,11 @@ def main():
         out.append(f"  Összes hiányzó mennyiség: {p['osszes_hianyzo_mennyiseg']:g} "
                     f"({p['erintett_rendelesek']} rendelésen)")
         if not p["van_forras"]:
-            out.append("  (nincs ismert beszerzési forrás)")
+            out.append("  (nincs ismert beszerzési forrás a beszállítói adatbázisból)")
         else:
             for o in p["beszallitok"]:
                 out.append(render_offer_line(o))
+        out.extend(render_rs3_history(p.get("rs3_beszerzesi_elozmeny", [])))
 
     text = "\n".join(out)
     if len(sys.argv) > 2:
