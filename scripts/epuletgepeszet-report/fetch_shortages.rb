@@ -98,27 +98,30 @@ rows.each do |r|
   pt['rendelesek'] += 1
 end
 
-# RS3 sajat beszerzesi elozmeny (megrendfejk+megrendlabk, a "k" vegzodesu
-# tablak a beszerzesi/beszallitoi rendelesek, NEM a vevoi megrendfej/megrendlab).
-# Milan kifejezett kerese (2026-08-28 18:47/18:54): az utolso 3 alkalom, kitol
-# es mennyiert vettuk RS3-ban, KULON megjelolve hogy ez RS3-eredetu adat, nem
-# a tebez beszallito-adatbazisbol jon. Kulonosen fontos ott, ahol nincs tebez
-# parositas (35/60 esetben), de mindig szerepeljen ha van ilyen elozmeny.
+# RS3 sajat beszerzesi elozmeny -- bevet + bevetlab (TENYLEGES bevetelezes,
+# valodi szallitoi szamlaval), NEM megrendfejk/megrendlabk (az csak a kimeno
+# beszerzesi RENDELES, ami sok esetben nincs is kitoltve meg ha a bevetelezes
+# megtortent -- 2026-08-28-an Milan konkret peldaval (VG-739072, Fogarasi
+# Ep-Gepesz Kft, szamla FO1026B-09580, bevet.bkod=33623) buktatta meg a
+# korabbi megrendfejk-alapu verziot: a valodi vasarlas nem szerepelt benne,
+# mert oda a formalis rendeles-lepes nelkul is bevetelezhet. A bevet tablaban
+# a szallneve mezo mar keszen van, nincs szukseg szallito-join-ra.
+# Lefedettseg osszehasonlitva a 2026-08-28-i 60-as hianycikk-mintan:
+# megrendfejk 10/60, bevet/bevetlab 49/60 -- ez az elsodleges forras.
 def rs3_purchase_history(tkod)
   esc = tkod.gsub("'", "''")
   sql = <<~SQL
-    SELECT mf.datum, sz.megnev AS beszallito, ml.ar, ml.menny
-    FROM megrendfejk mf
-    JOIN megrendlabk ml ON ml.mkod = mf.mkod
-    LEFT JOIN szallito sz ON sz.szkod = mf.szkod
-    WHERE ml.tkod = '#{esc}'
-    ORDER BY mf.datum DESC
+    SELECT b.datum, b.szallneve AS beszallito, bl.ar, bl.db AS menny
+    FROM bevet b
+    JOIN bevetlab bl ON bl.bkod = b.bkod
+    WHERE bl.tkod = '#{esc}'
+    ORDER BY b.datum DESC
     LIMIT 3
   SQL
   SuppliersDB::MegbizoConnection.query(sql).map do |r|
     {
       'datum' => r['datum']&.strftime('%Y-%m-%d'),
-      'beszallito' => fix_enc(r['beszallito']) || 'ismeretlen (szallito tablaban nincs nev)',
+      'beszallito' => fix_enc(r['beszallito']) || 'ismeretlen (bevet.szallneve ures)',
       'egysegar' => r['ar'],
       'mennyiseg' => r['menny'],
     }
