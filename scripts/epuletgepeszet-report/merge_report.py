@@ -72,6 +72,8 @@ def main():
         "rendelesenkenti_bontas": rendelesek,
         "termek_osszesito": osszesito,
         "uj_termekcsoportok": shortages.get("uj_termekcsoportok", []),
+        "allapotfajl_ujraepult": shortages.get("allapotfajl_ujraepult", False),
+        "allapotfajl_csoport_szam": shortages.get("allapotfajl_csoport_szam", 0),
     }
 
     with open(out_path, "w", encoding="utf-8") as f:

@@ -53,6 +53,11 @@ def main():
     out.append(f"Nyitott rendelés hiánycikkel: {report['osszes_rendeles']}")
     out.append(f"Különböző hiánycikk: {report['osszes_termek']}")
     out.append(f"Ebből ismert beszerzési forrás nélkül: {report['forras_nelkuli_termekszam']}")
+    if report.get("allapotfajl_ujraepult"):
+        out.append("")
+        out.append(f"FIGYELEM: az új-termékcsoport állapotfájl hiányzott, újraépült "
+                    f"({report.get('allapotfajl_csoport_szam', 0)} csoport felvéve) -- "
+                    f"új csoport detektálás ma nem megbízható.")
     out.append("")
     out.append("=" * 70)
     out.append("1. RENDELÉSENKÉNTI BONTÁS")

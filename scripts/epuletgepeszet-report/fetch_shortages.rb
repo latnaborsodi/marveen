@@ -155,6 +155,12 @@ end
 # derult ki (lasd a fenti kizaras kommentjet): igy mar az elso elofordulaskor
 # lathato, nem csak amikor mar furcsan nez ki a jelentes.
 known_groups_path = out_path ? File.join(File.dirname(out_path), 'known_groups.json') : nil
+# Az allapotfajl a store/ alatt van, NINCS verziokezelve (mint korabban az
+# outgoing-copy-gate-rules.json, aminek elveszese fel napba kerult -- Donat,
+# 2026-08-30). Ha eltunik, a kovetkezo futas csendben ujraseedelne es minden
+# csoportot ismertnek jelolne -- pont akkor nyelne el nemán egy uj csoportot,
+# amikor a detektalasnak mukodnie kene. Ezert kulon jelezzuk ha ujraepult.
+known_groups_missing = known_groups_path ? !File.exist?(known_groups_path) : false
 known_groups = {}
 if known_groups_path && File.exist?(known_groups_path)
   JSON.parse(File.read(known_groups_path, encoding: 'UTF-8')).each { |k, v| known_groups[k.to_i] = v }
@@ -174,6 +180,8 @@ result = {
   'osszes_rendeles' => orders.size,
   'osszes_termek' => product_totals.size,
   'uj_termekcsoportok' => uj_termekcsoportok,
+  'allapotfajl_ujraepult' => known_groups_missing,
+  'allapotfajl_csoport_szam' => seen_groups.size,
 }
 
 json = JSON.pretty_generate(result)
