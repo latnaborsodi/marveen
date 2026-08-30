@@ -97,6 +97,17 @@ def main():
                 out.append(render_offer_line(o))
         out.extend(render_rs3_history(p.get("rs3_beszerzesi_elozmeny", [])))
 
+    uj_csoportok = report.get("uj_termekcsoportok", [])
+    if uj_csoportok:
+        out.append("")
+        out.append("=" * 70)
+        out.append("3. ÚJ TERMÉKCSOPORT A LISTÁN")
+        out.append("=" * 70)
+        out.append("Ezek a csoportkódok korábban még nem szerepeltek ebben a jelentésben.")
+        out.append("Nem lettek kizárva, csak jelezve -- érdemes megnézni valódi hiánycikkek-e.")
+        for g in uj_csoportok:
+            out.append(f"  * {g['csopkod']} | {g['csopnev']}")
+
     text = "\n".join(out)
     if len(sys.argv) > 2:
         open(sys.argv[2], "w", encoding="utf-8").write(text)

@@ -45,10 +45,11 @@ sql = <<~SQL
   SELECT mf.mkod, mf.datum, mf.megnev AS vevo_nev,
          CASE WHEN mf.ocid3 IS NOT NULL AND mf.ocid3 <> 0 THEN 'OC3' ELSE 'kezi' END AS forras,
          ml.tkod, c.megnev AS termek_nev, (ml.menny - ml.szalliton) AS hianyzo_mennyiseg,
-         ml.ar AS eladasi_ar_netto
+         ml.ar AS eladasi_ar_netto, c.csopkod, cs.megnev AS csopnev
   FROM megrendfej mf
   JOIN megrendlab ml ON ml.mkod = mf.mkod
   JOIN cikk c ON c.tkod = ml.tkod
+  LEFT JOIN csoport cs ON cs.kod = c.csopkod
   WHERE mf.thkod = 7
     AND mf.archivalva IS NULL
     AND (ml.menny - ml.szalliton) > 0
@@ -73,8 +74,11 @@ cutoff_days = 90
 now = Time.now
 orders = {}
 product_totals = {}
+seen_groups = {} # csopkod (int) => csopnev, minden a mai listaban elofordulo csoport
 
 rows.each do |r|
+  csopkod = r['csopkod']&.to_i
+  seen_groups[csopkod] = fix_enc(r['csopnev']) || '(nincs csoportnev)' if csopkod
   mkod = r['mkod'].to_i
   datum = r['datum']
   age_days = datum ? ((now - datum) / 86_400.0).round : nil
@@ -143,6 +147,25 @@ product_totals.each_value do |pt|
   pt['eladasi_ar_netto_max'] = arak.max
 end
 
+# Uj termekcsoport-eszleles (Donat kerese, 2026-08-30): ha a hianycikkek kozott
+# olyan csopkod bukkan fel, ami korabban meg SOHA nem szerepelt ebben a
+# jelentesben, azt jelezzuk a report vegen -- nem zarjuk ki, nem dontunk
+# helyette, csak lathatova tesszuk. Ugyanazt a hibaosztalyt fedi le ami a
+# "Szallitasi koltseg WEB"/"Utanvet dij EPGEP" csoportoknal harom het alatt
+# derult ki (lasd a fenti kizaras kommentjet): igy mar az elso elofordulaskor
+# lathato, nem csak amikor mar furcsan nez ki a jelentes.
+known_groups_path = out_path ? File.join(File.dirname(out_path), 'known_groups.json') : nil
+known_groups = {}
+if known_groups_path && File.exist?(known_groups_path)
+  JSON.parse(File.read(known_groups_path, encoding: 'UTF-8')).each { |k, v| known_groups[k.to_i] = v }
+end
+uj_termekcsoportok = seen_groups.reject { |kod, _| known_groups.key?(kod) }
+                                 .map { |kod, nev| { 'csopkod' => kod, 'csopnev' => nev } }
+                                 .sort_by { |g| g['csopkod'] }
+if known_groups_path
+  File.write(known_groups_path, JSON.pretty_generate(known_groups.merge(seen_groups)), encoding: 'UTF-8')
+end
+
 result = {
   'generalva' => now.strftime('%Y-%m-%d %H:%M:%S'),
   'kriterium' => 'thkod=7, archivalva IS NULL, menny-szalliton>0, cikk.szabad<=0',
@@ -150,6 +173,7 @@ result = {
   'termek_osszesito' => product_totals.values.sort_by { |p| -p['osszes_hianyzo_mennyiseg'] },
   'osszes_rendeles' => orders.size,
   'osszes_termek' => product_totals.size,
+  'uj_termekcsoportok' => uj_termekcsoportok,
 }
 
 json = JSON.pretty_generate(result)

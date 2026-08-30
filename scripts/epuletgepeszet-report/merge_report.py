@@ -71,6 +71,7 @@ def main():
         "forras_nelkuli_termekszam": len(forras_nelkul),
         "rendelesenkenti_bontas": rendelesek,
         "termek_osszesito": osszesito,
+        "uj_termekcsoportok": shortages.get("uj_termekcsoportok", []),
     }
 
     with open(out_path, "w", encoding="utf-8") as f:
