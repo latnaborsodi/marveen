@@ -15,6 +15,7 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { logger } from '../logger.js'
 import { PROJECT_ROOT } from '../config.js'
@@ -42,11 +43,22 @@ export function deriveProcessPattern(def: McpServerDef): string | null {
   return null
 }
 
-// Merge the project-root .mcp.json with the agent's own (agent wins on name
-// collision), returning name -> ps pattern. Missing/unparsable files yield {}.
+// Merge the USER-LEVEL ~/.claude.json, the project-root .mcp.json, and the
+// agent's own .mcp.json (later entries win on name collision), returning
+// name -> ps pattern. Missing/unparsable files yield {}.
+//
+// The user-level file was missing here until 2026-09-01 (found while
+// investigating the boot-race incident): an MCP server added via `claude mcp
+// add` at the user scope (e.g. this install's `email` server) lives ONLY in
+// ~/.claude.json's top-level `mcpServers`, never in a project or agent
+// .mcp.json. Without this, requires.mcp_servers: ['email'] would resolve
+// 'email' to an UNKNOWN name and the precheck fails open (see
+// decideMcpPrecheck below) -- a declared requirement that silently protects
+// nothing, which is worse than no requirement at all because it looks like a
+// safeguard.
 export function resolveMcpProcessPatterns(agentName: string | null): Record<string, string> {
   const out: Record<string, string> = {}
-  const files = [join(PROJECT_ROOT, '.mcp.json')]
+  const files = [join(homedir(), '.claude.json'), join(PROJECT_ROOT, '.mcp.json')]
   if (agentName) {
     try {
       files.push(join(agentDir(agentName), '.mcp.json'))
