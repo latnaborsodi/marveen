@@ -165,9 +165,17 @@ export function checkTaskMcpRequirements(
     collectSubtreeCmdlines(psOutput, claudePid),
   )
   if (result.unknown.length) {
-    logger.debug(
+    // WARN, not debug (2026-09-01 fix): a declared requires.mcp_servers name
+    // this precheck cannot resolve is a gate that is formally present but
+    // protects nothing -- the same failure shape as an empty rule file that
+    // looks like it is enforcing something. Fail-open stays the right
+    // default (a name typo or a legitimately different config shape must
+    // never block an unrelated task), but the gap needs to be visible at the
+    // normal log level, not buried at debug where an empty guarantee can sit
+    // unnoticed indefinitely.
+    logger.warn(
       { agent: agentName, session, unknown: result.unknown },
-      'MCP pre-check: no process pattern derivable for some required servers (fail-open)',
+      'MCP pre-check: requires.mcp_servers names a server with no derivable process pattern -- this requirement resolves to nothing and is NOT enforced (fail-open)',
     )
   }
   return result
