@@ -25,6 +25,25 @@ describe('parseRequires (task-config requires.mcp_servers)', () => {
     expect(parseRequires({ mcp_servers: [42, 'gmail-readonly'] as unknown as string[] }))
       .toEqual({ mcp_servers: ['gmail-readonly'] })
   })
+
+  // network_hosts (2026-09-01 boot-race incident): independent from
+  // mcp_servers -- a task may declare either, both, or neither, and a
+  // malformed one must not invalidate a well-formed sibling.
+  it('elfogadja a network_hosts string-tombot, fuggetlenul az mcp_servers-tol', () => {
+    expect(parseRequires({ network_hosts: ['vps.bezzeghkft.hu'] }))
+      .toEqual({ network_hosts: ['vps.bezzeghkft.hu'] })
+    expect(parseRequires({ mcp_servers: ['gmail-readonly'], network_hosts: ['vps.bezzeghkft.hu'] }))
+      .toEqual({ mcp_servers: ['gmail-readonly'], network_hosts: ['vps.bezzeghkft.hu'] })
+  })
+
+  it('network_hosts hibas alakja csendben eldob, az ep mcp_servers megmarad', () => {
+    expect(parseRequires({ network_hosts: 'vps.bezzeghkft.hu' as unknown as string[] })).toBeUndefined()
+    expect(parseRequires({ network_hosts: [] })).toBeUndefined()
+    expect(parseRequires({ mcp_servers: ['gmail-readonly'], network_hosts: [] }))
+      .toEqual({ mcp_servers: ['gmail-readonly'] })
+    expect(parseRequires({ mcp_servers: [], network_hosts: ['vps.bezzeghkft.hu'] }))
+      .toEqual({ network_hosts: ['vps.bezzeghkft.hu'] })
+  })
 })
 
 describe('deriveProcessPattern', () => {

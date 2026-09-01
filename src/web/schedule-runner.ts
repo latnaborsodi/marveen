@@ -1,6 +1,7 @@
 import { join, isAbsolute } from 'node:path'
 import { homedir } from 'node:os'
 import { checkTaskMcpRequirements } from './schedule-mcp-precheck.js'
+import { checkTaskNetworkRequirements } from './schedule-network-precheck.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { atomicWriteFileSync } from './atomic-write.js'
@@ -497,6 +498,16 @@ function mcpMissingReason(taskName: string, agentName: string): string {
   return missing.length ? `mcp-missing:${missing.join(',')}` : 'mcp-missing'
 }
 
+// Same pattern as lastMcpMissing/mcpMissingReason above, for the network
+// pre-check (requires.network_hosts) -- keyed by task@agent so the retry
+// row's reason and the aged Telegram alert can name the unresolved host(s).
+const lastNetworkMissing = new Map<string, string[]>()
+
+function networkMissingReason(taskName: string, agentName: string): string {
+  const missing = lastNetworkMissing.get(`${taskName}@${agentName}`) ?? []
+  return missing.length ? `network-missing:${missing.join(',')}` : 'network-missing'
+}
+
 // Two pre-check gates coexist here:
 //   1. the operator preCheck SCRIPT (business gate) runs in the callers via
 //      runPreCheck() -- it can SKIP the whole tick (no LLM) or inject context
@@ -541,7 +552,7 @@ async function attemptFireTask(
   now: number,
   preCheckPrefix?: string,
   lateCatchUpMs?: number,
-): Promise<'fired' | 'busy' | 'missing' | 'starting' | 'error' | 'mcp-missing' | 'first-run'> {
+): Promise<'fired' | 'busy' | 'missing' | 'starting' | 'error' | 'mcp-missing' | 'network-missing' | 'first-run'> {
   const { session, host } = resolveTaskTarget(task, agentName)
 
   if (!sessionExistsOnHost(host, session)) {
@@ -619,6 +630,28 @@ async function attemptFireTask(
       return 'first-run'
     }
     logger.info({ task: task.name, agent: agentName, session }, 'forceSend=true, bypassing busy-state check')
+  }
+
+  // Network-readiness pre-check (requires.network_hosts, 2026-09-01 boot-race
+  // incident): a required host that does not resolve within the timeout
+  // defers the task instead of letting the prompt fail at runtime INSIDE the
+  // session with a bare CONNECT_TIMEOUT. Distinct from the MCP process-
+  // liveness check below: a boot-race window can have the MCP subprocess
+  // already running while the network path (WiFi/DNS/Tailscale) is still
+  // settling, which process-liveness cannot see. Runs after the busy check
+  // (same reasoning as the MCP precheck) and before it (network is the more
+  // fundamental gate: an MCP whose process is alive is still useless without
+  // a network path). forceSend keeps its "always eventually land" contract.
+  if (task.type !== 'command' && task.requires?.network_hosts?.length) {
+    const netCheck = await checkTaskNetworkRequirements(task.requires.network_hosts, task.name, agentName)
+    if (!netCheck.ok) {
+      if (task.forceSend) {
+        logger.warn({ task: task.name, agent: agentName, session, missing: netCheck.missing }, 'Network pre-check failed but forceSend=true -- delivering anyway')
+      } else {
+        lastNetworkMissing.set(`${task.name}@${agentName}`, netCheck.missing)
+        return 'network-missing'
+      }
+    }
   }
 
   // MCP manifest pre-check (requires.mcp_servers, Roitman 22.5): a required
@@ -883,8 +916,10 @@ export async function runScheduledTaskNow(
     // busy session both get a queued retry that lands once the session is
     // ready. We deliberately do NOT consult skipIfBusy here -- that flag trims
     // redundant cron ticks, but an explicit run-now must not be dropped.
-    if (result === 'starting' || result === 'busy' || result === 'mcp-missing' || result === 'first-run') {
-      const reason = result === 'mcp-missing' ? mcpMissingReason(task.name, agentName) : result
+    if (result === 'starting' || result === 'busy' || result === 'mcp-missing' || result === 'network-missing' || result === 'first-run') {
+      const reason = result === 'mcp-missing' ? mcpMissingReason(task.name, agentName)
+        : result === 'network-missing' ? networkMissingReason(task.name, agentName)
+        : result
       insertPendingTaskRetryIfNew(task.name, agentName, now, reason)
     }
     summary.push(`${agentName}: ${result}`)
@@ -1238,12 +1273,26 @@ export function startScheduleRunner(): NodeJS.Timeout {
         // the live state.
         appendTaskRun(row.task_name, row.agent_name, 'missing-retrying')
       }
+      // Same transition-only logging for network-missing (2026-09-01): a
+      // silent delay is exactly as bad as a silent failure here, so the
+      // dashboard run-history must show "waiting on network", not nothing,
+      // the moment a network-dependent task first defers -- not only after
+      // the (1-hour) aged Telegram alert threshold. last_reason carries the
+      // unresolved host list after a colon, so match on the reason FAMILY
+      // (prefix), not exact equality, or every tick would re-log because the
+      // host list is refreshed each attempt.
+      const wasNetworkMissing = row.last_reason === 'network-missing' || (row.last_reason?.startsWith('network-missing:') ?? false)
+      if (result === 'network-missing' && !wasNetworkMissing) {
+        appendTaskRun(row.task_name, row.agent_name, 'network-missing-retrying')
+      }
       // Still busy or errored: refresh the retry row and alert ONCE if
       // the age crossed the threshold. `updatePendingTaskRetry` returns
       // false when the row has been cancelled between load and now --
       // in that case, do not re-insert (the operator's cancel wins) and
       // do not alert.
-      const reason = result === 'mcp-missing' ? mcpMissingReason(row.task_name, row.agent_name) : result
+      const reason = result === 'mcp-missing' ? mcpMissingReason(row.task_name, row.agent_name)
+        : result === 'network-missing' ? networkMissingReason(row.task_name, row.agent_name)
+        : result
       const stillPresent = updatePendingTaskRetry(row.task_name, row.agent_name, now, reason)
       if (stillPresent && view.alertDue) sendPendingRetryAlert(view, now)
 
@@ -1251,9 +1300,9 @@ export function startScheduleRunner(): NodeJS.Timeout {
       // repeating past the threshold is the one case worth a second look: the
       // pane may not be working at all, just holding an unsubmitted line that
       // pins isSessionReadyForPrompt false forever (see the constant's note).
-      // Only 'busy' qualifies -- 'starting', 'missing', 'first-run' and
-      // 'mcp-missing' each have their own owner, and none of them is fixed by
-      // emptying the input box. clearStaleParkedInput does the identifying and
+      // Only 'busy' qualifies -- 'starting', 'missing', 'first-run',
+      // 'mcp-missing' and 'network-missing' each have their own owner, and
+      // none of them is fixed by emptying the input box. clearStaleParkedInput does the identifying and
       // refuses anything that is genuinely mid-turn; if it clears, the next
       // tick's retry delivers on its own.
       if (stillPresent && result === 'busy' && view.ageMs > SCHEDULE_JANITOR_PARKED_MIN_AGE_MS) {
@@ -1382,6 +1431,16 @@ export function startScheduleRunner(): NodeJS.Timeout {
           // pre-check exists to eliminate. The retry row keeps the task alive
           // until the server returns, and the alert names the dead server.
           insertPendingTaskRetryIfNew(task.name, agentName, now, mcpMissingReason(task.name, agentName))
+        } else if (result === 'network-missing') {
+          // Same "never honor skipIfBusy" reasoning as mcp-missing above.
+          // Unlike mcp-missing, this ALSO writes an immediate run-log entry
+          // (not just the retry row) -- a silent delay is exactly as bad as a
+          // silent failure per the 2026-09-01 incident review, so the
+          // dashboard run-history must show "waiting on network" on the very
+          // first deferred tick, not only once the row ages past the
+          // hour-long alert threshold.
+          insertPendingTaskRetryIfNew(task.name, agentName, now, networkMissingReason(task.name, agentName))
+          appendTaskRun(task.name, agentName, 'network-missing-retrying')
         } else if (result === 'first-run') {
           // Also exempt from skipIfBusy: a session parked on a first-run
           // dialog (fresh install) never frees up between ticks the way a

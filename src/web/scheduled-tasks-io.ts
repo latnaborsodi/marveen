@@ -71,7 +71,14 @@ export interface ScheduledTask {
   // runner pre-checks each named MCP server has a live process under the
   // target session before injecting the prompt; a dead server defers the task
   // with a reasoned alert instead of a silent runtime failure.
-  requires?: { mcp_servers?: string[] }
+  // network_hosts (2026-09-01, boot-race incident) is a SEPARATE gate: it
+  // proves DNS resolves for each named host (e.g. the mail server) before
+  // firing, catching the window where a required MCP's process already
+  // exists but its network path (WiFi/DNS/Tailscale, still settling right
+  // after boot) is not ready yet -- a case mcp_servers' process-liveness
+  // check cannot see. Independent field: a task may declare either, both, or
+  // neither.
+  requires?: { mcp_servers?: string[]; network_hosts?: string[] }
 }
 
 function readFileOr(path: string, fallback: string): string {
@@ -104,7 +111,7 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
   const skillContent = hasSkill ? readFileOr(skillPath, '') : ''
   const { name, description, body } = parseSkillMdFrontmatter(skillContent)
 
-  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; description?: string; command?: string; timeoutMs?: number; failThreshold?: number; preCheck?: string; catchUpMaxAgeMinutes?: unknown; stuckAfterMinutes?: unknown; requires?: { mcp_servers?: unknown } } = {}
+  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; description?: string; command?: string; timeoutMs?: number; failThreshold?: number; preCheck?: string; catchUpMaxAgeMinutes?: unknown; stuckAfterMinutes?: unknown; requires?: { mcp_servers?: unknown; network_hosts?: unknown } } = {}
   try {
     config = JSON.parse(readFileOr(configPath, '{}'))
   } catch { /* use defaults */ }
@@ -145,12 +152,29 @@ export function parseCatchUpMaxAge(raw: unknown): number | undefined {
   return parseFiniteMinutes(raw)
 }
 
-// Accept only a string array for requires.mcp_servers; anything else is
-// treated as absent so a malformed config cannot wedge the runner.
-export function parseRequires(raw: { mcp_servers?: unknown } | undefined): ScheduledTask['requires'] {
-  if (!raw || !Array.isArray(raw.mcp_servers)) return undefined
-  const servers = raw.mcp_servers.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
-  return servers.length ? { mcp_servers: servers } : undefined
+// Accept only a non-empty string array for a `requires` sub-key; anything
+// else (missing, wrong shape, empty after filtering) is treated as absent so
+// a malformed config cannot wedge the runner.
+function parseStringArray(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const values = raw.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+  return values.length ? values : undefined
+}
+
+// mcp_servers and network_hosts are independent: a config may set either,
+// both, or neither. Each is validated on its own so a malformed one does not
+// invalidate a well-formed sibling.
+export function parseRequires(
+  raw: { mcp_servers?: unknown; network_hosts?: unknown } | undefined,
+): ScheduledTask['requires'] {
+  if (!raw) return undefined
+  const mcp_servers = parseStringArray(raw.mcp_servers)
+  const network_hosts = parseStringArray(raw.network_hosts)
+  if (!mcp_servers && !network_hosts) return undefined
+  return {
+    ...(mcp_servers ? { mcp_servers } : {}),
+    ...(network_hosts ? { network_hosts } : {}),
+  }
 }
 
 export function listScheduledTasks(): ScheduledTask[] {
