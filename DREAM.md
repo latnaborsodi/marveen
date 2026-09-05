@@ -1,25 +1,56 @@
-# 💭 Dream Engine — 2026-08-20 02:08
+# 💭 Dream Engine — 2026-09-05 02:07
 
 ## 💡 Skill-javaslatok
-- **Heartbeat-reflexió küszöb újragondolása** (flotta-szintű, folyamat-javaslat): a memoria-heartbeat "A = 5+ tool-hívás → KÖTELEZŐ skill-akció" szabálya rutin ütemezett futásokra (dream-engine, ORKUTYA, kanban-audit) is ráugrik, így ezek minden alkalommal csak egy "skip-skill" memóriát termelnek. Ez ma a 3. egymást követő éjszaka (08-18, 08-19, 08-20), tehát a saját 08-19-es jegyzet feltétele teljesült. Javaslat: az A-kritérium zárja ki azokat a futásokat, amelyek egy dokumentált scheduled-task saját eljárását hajtják végre. Ez a memoria-heartbeat task-config szerkesztése, ezért Donat döntésére hagyom.
-- A tegnapi valódi tanulságok (telegram MCP kiesés → Bot API fallback; VS Code-os duplikált plugin-betöltés) már futás közben skillbe kerültek (`telegram-reply-chatid`, `channel-plugin-duplicate-socket`), nincs további skillesíthető minta.
+
+- **Nincs UJ javaslat**, de egy tegnapi ATVITT tetel valtozatlanul all: az `invoice-forward`
+  utemezett feladat fusson sajat spawnolt sessionben, a napindito mintajara. Tegnap ez
+  elmeleti volt, mara viszont ket kulon meres is alatamasztja: a feladat 10:08-kor a fo
+  sessionbe erkezett, ahol a gmail eszkozok nem is latszottak, es csak egy kulon
+  spawnolt session mutatta meg, hogy valojaban a token a hibas. Amig ez nem igy fut,
+  minden token-hiba ket lepesben derul ki egy helyett.
+- Skill-patch ma harom is tortent (`diagnose-morning-digest-missing-email-calendar`,
+  `orkutya-flotta-ellenorzes`, `invoice-forward`, plusz a `github-pr-rebase-merge`), tehat
+  a friss tudas mar be van vezetve; nem duplikalom oket javaslatkent.
 
 ## 🧹 Memória-egészség
-106 / 106 vektorizált (100%). 0 antikvált hot-tier (nincs 7 napnál régebben nem érintett hot memória). 5 duplikált content-csoport van, de mindegyik már rendezett állapot: csoportonként legfeljebb egy warm példány maradt, a többi cold — teendő nincs. Áthelyezés nem történt.
+
+173 / 173 vektorizált (100%), 1 hot→cold mozgatva, 0 valódi duplikátum.
+
+- **177 → cold**: tegnap reggeli allapotkep a harom nyitott szalrol. Nem elavult idovel,
+  hanem RESZBEN TELJESULT: a watchdog-javaslatra Donat rabolintott, a kod elkeszult es
+  ket PR nyitva all. A valosag ellen ellenorizve irtam helyette friss **hot** bejegyzest:
+  a ket mergelesre varo PR (1177, 1178), a tovabbra is torott gmail auth, a ket meg el
+  nem keszult reszfeladat, es a valaszra varo Reka-szal.
+- A duplikatum-lekerdezes ot csoportot hoz, mind kesz allapot (egy warm plusz cold masolatok,
+  vagy csupa cold). Teendo nincs.
 
 ## 🎯 Top-3 holnapi javaslat
-1. **tebez (railsdev)**: `0535741d` Unified XML szűkítés + `71f88c76` Mapei MAP_ prefix — a két egyetlen `high` prioritású, nem-tourguide kártya, mindkettő 07-21 óta mozdulatlan `planned`-ben, miközben a Mapei/unified szál volt a nyár utolsó aktív adat-témája.
-2. **tourguide (janos/Évi)**: `39e82860` + `8f496923` városleírás-review és célnyelvi content — `waiting` státuszban 06-04 óta, kizárólag Évi inputjára várnak. Egy rövid emlékeztető feloldhatja, vagy le kell zárni a kártyákat, ha a szál elhalt.
-3. **flotta (marveen)**: a 9 db "Modell-váltás" kártya (`23be3767` … `69c0e689`) 07-15 óta `planned` — az agentek időközben `claude-sonnet-5` / `claude-opus-4-7` modelleken futnak, tehát a kártyák vagy elavultak, vagy egy konkrét célmodell hiányzik belőlük. Érdemes egyben lezárni vagy pontosítani.
+
+1. **marveen: a ket PR merge-elese** — `1177` (stuck-input 15 perces felso korlat) es `1178`
+   (a torles ellenorzi, hogy tenyleg kiurult a doboz). Mindketto OPEN es MERGEABLE, a
+   teljes suite zold, de a latnaborsodi fioknak nincs merge joga a Szotasz/marveen-be,
+   tehat ez egy gombnyomas Donatnal. Amig nincs bent, a 25 oras nema kieses megismetlodhet.
+2. **marveen: a Gmail-auth tenyleges befejezese** — a credentials fajl valtozatlanul
+   08-28-i, a hetente lejaro token miatt a szamla-tovabbitas otodik napja vak. Ehhez tartozik
+   a consent screen atallitasa In production allapotba, kulonben jovo penteken ujra elhal.
+3. **tebez/railsdev: `0535741d` + `71f88c76` lezarasa** — a ket magas prioritasu kartya
+   2026-07-21 ota `planned`, a kod viszont keszen all es teszttel fedett. Egyetlen
+   igen/nem ket sort tuntet el a tablarol.
 
 ## 🌐 External opportunity
-- Skip — heti limit. Az utolsó külső körre 2026-08-17 02:09-kor került sor (`store/external-ops-last-run`), a 7 napos ablak még nem telt le.
+
+Skip, heti limit. Az utolso ajanlas tegnap 10:17-kor ment (`VoltAgent/awesome-agent-skills`),
+ez egy napja. A kovetkezo esedekes idopont 09-11.
 
 ## 🛠 Skill-flotta health
-- Nem megítélhető: a `skill_usage` tábla üres (0 sor), így nincs használati adat az antikváltság méréséhez. 19 nem-pinned skill van, mind projekt-specifikus és a legutóbbi hetekben született vagy patchelve lett — törlést egyik esetében sem javaslok mérés nélkül.
+
+Nem megitelheto hasznalati adat nelkul, lasd a Hibak szekciot.
 
 ## ⚠️ Hibák
-- `skill_usage` tábla üres → Bucket 5 nem mérhető (ismétlődő megfigyelés, 08-17 óta változatlan).
-- `daily_logs` az elmúlt 7 napban mindössze 2 bejegyzést tartalmaz (mindkettő 08-19, telegram-csatorna incidens), így a Bucket 3 súlyozása kanban-adatból és a kártyák korából származik, nem aktivitás-mérésből.
+
+- A `skill_usage` tabla tovabbra is 0 soros, a Bucket 5 strukturalisan halott.
+- Utkozes a feladat fejleceben: a schedule-runner `kuldd el Telegramon` utasitasa
+  szembemegy a feladat sajat "02:07-kor NE kuldj uzenetet" szabalyaval. A szukebb szabaly
+  nyert, Telegramra semmi nem ment; ezt a fajlt a 07:30-as napindito viszi ki.
 
 *Marveen, 02:09 — most már alszom én is.*

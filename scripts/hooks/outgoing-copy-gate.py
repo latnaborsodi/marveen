@@ -186,24 +186,58 @@ _LOCAL_RULES = os.environ.get(
 )
 
 
+_GLOBAL_FLAGS = re.compile(r"^\(\?([aiLmsux]+)\)(.*)$", re.S)
+
+
+def _scope_flags(pat: str) -> str:
+    """(?i)foo -> (?i:foo) -- ugyanaz a jelentes, de barhol allhat.
+
+    A globalis flag csak a TELJES kifejezes elejen ervenyes, a mintakat viszont
+    "|"-vel egyetlen regexbe fuzzuk. A masodiktol kezdve a "(?i)" alak
+    "global flags not at the start of the expression" hibat ad.
+    """
+    m = _GLOBAL_FLAGS.match(pat)
+    return f"(?{m.group(1)}:{m.group(2)})" if m else pat
+
+
 def load_bad_name():
+    """-> (forditott regex | None, hibaok | None).
+
+    MIERT MINTANKENT FORDIT (2026-08-22): korabban egyetlen try/except nyelte
+    le az egesz koteget, es barmelyik rossz minta ugyanazt a "fajl hianyzik"
+    agat sultotte el. Eles esetben a fajl OTT VOLT es mind a 7 minta kulon-kulon
+    forditott, csak az osszefuzes bukott el egy "(?i)" flagen -- a kapu viszont
+    hianyzo fajlt jelentett, es fail-closed modban minden email-kuldest letiltott.
+    Egy vedelem, ami rossz okot mond, orakat visz el. Innentol a hibaok
+    NEVESITI, melyik minta rossz, es a flageket scoped alakra hozzuk.
+    """
     try:
         with open(_LOCAL_RULES, encoding="utf-8") as fh:
             pats = json.load(fh).get("bad_name_patterns") or []
-        if pats:
-            return re.compile("|".join(pats))
-    except OSError:
-        pass
-    except Exception:
-        pass
+    except FileNotFoundError:
+        return None, f"a szabaly-fajl nem letezik ({_LOCAL_RULES})"
+    except OSError as exc:
+        return None, f"a szabaly-fajl nem olvashato: {exc}"
+    except Exception as exc:
+        return None, f"a szabaly-fajl nem ervenyes JSON: {exc}"
+
+    if not pats:
+        return None, "a bad_name_patterns lista ures vagy hianyzik a szabaly-fajlbol"
+
+    scoped = []
+    for i, pat in enumerate(pats):
+        try:
+            re.compile(pat)
+        except re.error as exc:
+            return None, f"a(z) {i}. minta hibas ({pat!r}): {exc}"
+        scoped.append(_scope_flags(pat))
+
     try:
-        log_path = os.path.join(os.path.dirname(_LOCAL_RULES), "outgoing-copy-gate.log")
-        with open(log_path, "a", encoding="utf-8") as fh:
-            fh.write(f"outgoing-copy-gate: NEV-SZABALY FAJL HIANYZIK/URES ({_LOCAL_RULES}) -- "
-                     "a nev-ellenorzes NEM fut; potold a store/outgoing-copy-gate-rules.json-t.\n")
-    except OSError:
-        pass
-    return None
+        return re.compile("|".join(scoped)), None
+    except re.error as exc:
+        return None, ("a mintak kulon-kulon jok, de egyetlen regexbe fuzve nem "
+                      f"forditanak: {exc}. Tipikus ok: globalis flag a minta elejen; "
+                      "hasznalj scoped alakot, peldaul '(?i:foo)' a '(?i)foo' helyett")
 
 
 def _name_correction() -> str:
@@ -215,7 +249,16 @@ def _name_correction() -> str:
         return ""
 
 
-BAD_NAME = load_bad_name()
+BAD_NAME, BAD_NAME_REASON = load_bad_name()
+if BAD_NAME is None:
+    # Hangos nyom a logban is: egy kiesett vedelem, amirol csak a blokkolt
+    # hivas tud, addig vedelem, amig valaki hozza nem er a fahoz.
+    try:
+        with open(os.path.join(os.path.dirname(_LOCAL_RULES), "outgoing-copy-gate.log"),
+                  "a", encoding="utf-8") as _fh:
+            _fh.write(f"outgoing-copy-gate: NEV-ELLENORZES KIESETT -- {BAD_NAME_REASON}\n")
+    except OSError:
+        pass
 ACCENTED = set("áéíóöőúüűÁÉÍÓÖŐÚÜŰ")
 WORD = re.compile(r"[a-záéíóöőúüűA-ZÁÉÍÓÖŐÚÜŰ]+")
 TAG = re.compile(r"<[^>]+>")
@@ -366,9 +409,8 @@ def telegram_gate(tool_input: dict) -> None:
     # logfajlban, amit senki nem olvas.
     if BAD_NAME is None:
         print(json.dumps({"systemMessage":
-            "outgoing-copy-gate: a NEV-SZABALY fajl hianyzik/ures "
-            f"({_LOCAL_RULES}) -- a nev-ellenorzes NEM fut a kimeno uzeneteken. "
-            "Potold a store/outgoing-copy-gate-rules.json-t."}))
+            "outgoing-copy-gate: a nev-ellenorzes NEM fut a kimeno uzeneteken -- "
+            f"{BAD_NAME_REASON}. Fajl: {_LOCAL_RULES}"}))
     sys.exit(0)
 
 
@@ -472,10 +514,12 @@ def main():
     # figyelmeztetessel: az a felugyeleti csatorna, ott a nemulas a dragabb.)
     if BAD_NAME is None:
         sys.stderr.write(
-            "KIMENO-SZOVEG KAPU: TILTVA -- a NEV-SZABALY fajl hianyzik/ures "
-            f"({_LOCAL_RULES}), igy a nev-ellenorzes nem tud lefutni.\n"
-            "Email fail-closed: potold a store/outgoing-copy-gate-rules.json-t "
-            "(bad_name_patterns + correction), aztan kuldd ujra.\n"
+            "KIMENO-SZOVEG KAPU: TILTVA -- a nev-ellenorzes nem tud lefutni.\n"
+            f"  OK:    {BAD_NAME_REASON}\n"
+            f"  FAJL:  {_LOCAL_RULES}\n"
+            "  SHAPE: {\"bad_name_patterns\": [\"<python-regex>\", ...], "
+            "\"correction\": \"<szoveg>\"}\n"
+            "Email fail-closed. Javitsd a fenti okot, aztan kuldd ujra.\n"
         )
         sys.exit(2)
 

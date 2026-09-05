@@ -65,7 +65,12 @@ index_skills_dir() {
     fi
 
     local desc
-    desc=$(grep -m1 "^description:" "$skill_md" 2>/dev/null | sed 's/^description: *//' | tr -d '"' | tr -d "'" | cut -c1-120)
+    # `cut -c` counts BYTES under a non-UTF-8 locale, so a 120-byte cut lands
+    # mid-character on accented Hungarian descriptions and leaves invalid UTF-8
+    # in the index every agent loads as Level 0 context. python3 is a documented
+    # install dependency and truncates by character, so use it.
+    desc=$(grep -m1 "^description:" "$skill_md" 2>/dev/null | sed 's/^description: *//' | tr -d '"' | tr -d "'" \
+      | python3 -c 'import sys; sys.stdout.write(sys.stdin.read().rstrip("\n")[:120])')
     if [ -z "$desc" ]; then
       desc="(nincs leírás)"
     fi
