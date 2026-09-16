@@ -9,13 +9,15 @@
 //       'timeout' status was structurally unreachable.
 // These tests pin the fix for all three legs: the pure pieces behaviorally,
 // the wiring as string contracts (house idiom of approvals-prompt-contract).
-import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   applyTimeoutPolicy,
   computeTimeoutAt,
+  readCategoryTimeoutMinutes,
   buildOwnerApprovalText,
   DEFAULT_TIMEOUT_MINUTES,
   MAX_TIMEOUT_SECONDS,
@@ -117,6 +119,62 @@ describe('applyTimeoutPolicy (the category value is a FLOOR, not a fallback)', (
         expect(applyTimeoutPolicy(req, floor)).toBeGreaterThan(0)
       }
     }
+  })
+})
+
+// APPROVALFLOOR916 -- BUKAS-TESZT. Donat kikotese: uj kapuhoz kotelezo egy
+// probat irni, ami SZANDEKOSAN meg tud bukni. Ez az: egy agens ugy kuld
+// `timeout_seconds: 3600`-at, ahogy a regi sablon tanitotta, es a proba csak
+// akkor zold, ha a keletkezo hatarido 24 ora mulva van, nem egy ora mulva.
+// A config-olvasast is atfogja, nem csak a tiszta fuggvenyt, kulonben az also
+// korlat bekerulhetne a politikaba ugy, hogy a valodi hivasi utvonal nem hasznalja.
+describe('BUKAS-TESZT: a 3600-at kuldo regi agens is 24 orat kap', () => {
+  const now = Math.floor(NOW_MS / 1000)
+  let dir: string
+  let configPath: string
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'approval-floor-'))
+    configPath = join(dir, 'autonomy-config.json')
+    writeFileSync(configPath, JSON.stringify({
+      categories: [
+        { key: 'email_send', level: 2, timeout_minutes: 1440 },
+        { key: 'kanban_archive_done', level: 3 },
+      ],
+    }), 'utf-8')
+  })
+
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+
+  it('a fixture config timeout_minutes-e kiolvasodik', () => {
+    expect(readCategoryTimeoutMinutes('email_send', configPath)).toBe(1440)
+    expect(readCategoryTimeoutMinutes('kanban_archive_done', configPath)).toBeNull()
+    expect(readCategoryTimeoutMinutes('nincs-ilyen', configPath)).toBeNull()
+  })
+
+  it('MAGA A BUKAS-TESZT: timeout_seconds 3600 -> a hatarido 24 ora, nem egy', () => {
+    const at = computeTimeoutAt('email_send', 3600, NOW_MS, configPath)
+    expect(at - now).toBe(24 * 3600)
+    expect(at - now).not.toBe(3600)
+  })
+
+  it('a hosszabb keres tovabbra is atmegy, az also korlat nem plafon', () => {
+    expect(computeTimeoutAt('email_send', 3 * 24 * 3600, NOW_MS, configPath) - now).toBe(3 * 24 * 3600)
+  })
+
+  it('also korlat nelkuli kategorianal a regi viselkedes marad', () => {
+    expect(computeTimeoutAt('kanban_archive_done', 3600, NOW_MS, configPath) - now).toBe(3600)
+  })
+})
+
+// A masik fele Donat aggalyanak: az also korlat csak akkor er valamit, ha
+// EGYETLEN utvonal hoz letre jovahagyast. Ha valaki kesobb ir egy masodik
+// createApproval hivast, ez a teszt bukik, es nem kivulrol kell eszrevenni.
+describe('egyetlen hivasi utvonal hozhat letre jovahagyast', () => {
+  it('a createApproval-t csak a POST kezelo hivja, es az computeTimeoutAt-tel szamol', () => {
+    const calls = ROUTE.match(/createApproval\(/g) ?? []
+    expect(calls.length).toBe(1)
+    expect(ROUTE).toContain('const timeout_at = computeTimeoutAt(category, timeout_seconds)')
   })
 })
 

@@ -1136,6 +1136,7 @@ function buildAutonomyBody(name: string): string {
     'A válaszban kapott id-vel kérdezheted le a döntést.',
     '',
     'A határidőt NE te add meg. A kategória határideje a store/autonomy-config.json `timeout_minutes` mezőjéből jön, és az ALSÓ KORLÁT: `timeout_seconds`-szel csak hosszabbítani tudsz, rövidíteni nem. Ha a művelet tényleg hosszabb türelmi időt kíván, küldd el, egyébként hagyd ki.',
+    'A határidőről SOHA ne a saját kérésedből nyilatkozz. A POST válasza tartalmazza a `timeout_at` mezőt, az a tényleges lejárat; ha határidőt említesz bárkinek, azt idézd. Ha a kértnél hosszabb jött vissza, az nem hiba, hanem a kategória alsó korlátja.',
     '',
     'Döntés lekérdezése (GET, 60 mp-enként ismételve):',
     `curl -s -H "Authorization: Bearer $(cat ${tokenPath})" "${dashboardOrigin}/api/approvals/<id>"`,

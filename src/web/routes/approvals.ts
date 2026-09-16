@@ -26,10 +26,13 @@ export const DEFAULT_TIMEOUT_MINUTES = 1440
 // Cap: a timeout past a week is indistinguishable from the old "never".
 export const MAX_TIMEOUT_SECONDS = 7 * 24 * 3600
 
-function readCategoryTimeoutMinutes(category: string): number | null {
+// configPath is injectable ONLY so the failure test can point at a fixture:
+// the real store/autonomy-config.json is gitignored per-install, so a test
+// that read it would pass or fail depending on the machine.
+export function readCategoryTimeoutMinutes(category: string, configPath: string = AUTONOMY_CONFIG_PATH): number | null {
   try {
-    if (!existsSync(AUTONOMY_CONFIG_PATH)) return null
-    const config = JSON.parse(readFileSync(AUTONOMY_CONFIG_PATH, 'utf-8')) as {
+    if (!existsSync(configPath)) return null
+    const config = JSON.parse(readFileSync(configPath, 'utf-8')) as {
       categories: { key: string; timeout_minutes?: number | null }[]
     }
     const cat = config.categories.find(c => c.key === category)
@@ -62,8 +65,13 @@ export function applyTimeoutPolicy(timeoutSeconds: unknown, categoryFloorMinutes
 // Pure + exported for tests. `timeoutSeconds` is the request-body value as
 // received (unknown): the scaffolded agent instructions have always told
 // agents to send timeout_seconds, but the old handler never read it.
-export function computeTimeoutAt(category: string, timeoutSeconds: unknown, nowMs: number = Date.now()): number {
-  return Math.floor(nowMs / 1000) + applyTimeoutPolicy(timeoutSeconds, readCategoryTimeoutMinutes(category))
+export function computeTimeoutAt(
+  category: string,
+  timeoutSeconds: unknown,
+  nowMs: number = Date.now(),
+  configPath: string = AUTONOMY_CONFIG_PATH,
+): number {
+  return Math.floor(nowMs / 1000) + applyTimeoutPolicy(timeoutSeconds, readCategoryTimeoutMinutes(category, configPath))
 }
 
 // Owner-facing Telegram text. Pure + exported for tests. Plain text (no
