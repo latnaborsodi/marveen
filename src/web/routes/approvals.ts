@@ -40,17 +40,30 @@ function readCategoryTimeoutMinutes(category: string): number | null {
   }
 }
 
+// APPROVALFLOOR916: the category value used to be a mere FALLBACK -- the
+// caller's timeout_seconds won outright. That made the config unable to
+// protect anything: every scaffolded agent was told to send
+// `"timeout_seconds":3600`, so raising a category's deadline in
+// autonomy-config.json changed nothing while the hardcoded hour silently won.
+// A gate the caller overrides is not a gate. The category value is therefore a
+// FLOOR: a caller may ask for LONGER than the category requires, never shorter.
+// Pure + exported for tests: no config read, no clock.
+export function applyTimeoutPolicy(timeoutSeconds: unknown, categoryFloorMinutes: number | null): number {
+  const floor = categoryFloorMinutes != null && categoryFloorMinutes > 0
+    ? categoryFloorMinutes * 60
+    : null
+  const requested = typeof timeoutSeconds === 'number' && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
+    ? Math.floor(timeoutSeconds)
+    : null
+  const seconds = requested ?? floor ?? DEFAULT_TIMEOUT_MINUTES * 60
+  return Math.min(floor != null ? Math.max(seconds, floor) : seconds, MAX_TIMEOUT_SECONDS)
+}
+
 // Pure + exported for tests. `timeoutSeconds` is the request-body value as
 // received (unknown): the scaffolded agent instructions have always told
 // agents to send timeout_seconds, but the old handler never read it.
 export function computeTimeoutAt(category: string, timeoutSeconds: unknown, nowMs: number = Date.now()): number {
-  const now = Math.floor(nowMs / 1000)
-  if (typeof timeoutSeconds === 'number' && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0) {
-    return now + Math.min(Math.floor(timeoutSeconds), MAX_TIMEOUT_SECONDS)
-  }
-  const catMinutes = readCategoryTimeoutMinutes(category)
-  if (catMinutes != null && catMinutes > 0) return now + catMinutes * 60
-  return now + DEFAULT_TIMEOUT_MINUTES * 60
+  return Math.floor(nowMs / 1000) + applyTimeoutPolicy(timeoutSeconds, readCategoryTimeoutMinutes(category))
 }
 
 // Owner-facing Telegram text. Pure + exported for tests. Plain text (no

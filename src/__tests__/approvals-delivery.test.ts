@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  applyTimeoutPolicy,
   computeTimeoutAt,
   buildOwnerApprovalText,
   DEFAULT_TIMEOUT_MINUTES,
@@ -63,6 +64,59 @@ describe('computeTimeoutAt (leg 3: the timeout state must be reachable)', () => 
 
   it('NEVER returns null: with no param and no category value the default applies', () => {
     expect(computeTimeoutAt('nonexistent-category', undefined, NOW_MS)).toBe(now + DEFAULT_TIMEOUT_MINUTES * 60)
+  })
+})
+
+// APPROVALFLOOR916: the category deadline was a fallback the caller could
+// silently undercut. Every scaffolded agent sent `"timeout_seconds":3600`, so
+// raising a category's deadline in autonomy-config.json changed nothing -- the
+// hardcoded hour won. These pin the floor semantics.
+describe('applyTimeoutPolicy (the category value is a FLOOR, not a fallback)', () => {
+  const HOUR = 3600
+  const TWELVE_HOURS_MIN = 720
+
+  it('a caller asking for LESS than the category floor gets the floor', () => {
+    expect(applyTimeoutPolicy(HOUR, TWELVE_HOURS_MIN)).toBe(TWELVE_HOURS_MIN * 60)
+  })
+
+  it('a caller asking for MORE than the floor keeps the longer value', () => {
+    expect(applyTimeoutPolicy(3 * 24 * HOUR, TWELVE_HOURS_MIN)).toBe(3 * 24 * HOUR)
+  })
+
+  it('no floor configured: the caller value stands, as before', () => {
+    expect(applyTimeoutPolicy(HOUR, null)).toBe(HOUR)
+  })
+
+  it('no floor and no caller value: the 24h default stands', () => {
+    expect(applyTimeoutPolicy(undefined, null)).toBe(DEFAULT_TIMEOUT_MINUTES * 60)
+  })
+
+  it('a floor with no caller value applies the floor', () => {
+    expect(applyTimeoutPolicy(undefined, TWELVE_HOURS_MIN)).toBe(TWELVE_HOURS_MIN * 60)
+  })
+
+  it('junk from the caller cannot undercut the floor either', () => {
+    for (const junk of ['3600', -5, 0, NaN, Infinity, null, undefined, {}]) {
+      expect(applyTimeoutPolicy(junk, TWELVE_HOURS_MIN)).toBe(TWELVE_HOURS_MIN * 60)
+    }
+  })
+
+  it('a zero or negative floor is treated as "no floor", not as an instant timeout', () => {
+    expect(applyTimeoutPolicy(HOUR, 0)).toBe(HOUR)
+    expect(applyTimeoutPolicy(HOUR, -60)).toBe(HOUR)
+  })
+
+  it('the one-week cap still wins over a caller value AND over an absurd floor', () => {
+    expect(applyTimeoutPolicy(10 * 24 * HOUR, TWELVE_HOURS_MIN)).toBe(MAX_TIMEOUT_SECONDS)
+    expect(applyTimeoutPolicy(undefined, 30 * 24 * 60)).toBe(MAX_TIMEOUT_SECONDS)
+  })
+
+  it('NEVER returns a non-positive span: the timeout state stays reachable', () => {
+    for (const floor of [null, 0, -1, TWELVE_HOURS_MIN]) {
+      for (const req of [undefined, 0, -5, HOUR]) {
+        expect(applyTimeoutPolicy(req, floor)).toBeGreaterThan(0)
+      }
+    }
   })
 })
 
