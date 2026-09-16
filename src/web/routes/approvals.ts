@@ -52,14 +52,20 @@ export function readCategoryTimeoutMinutes(category: string, configPath: string 
 // FLOOR: a caller may ask for LONGER than the category requires, never shorter.
 // Pure + exported for tests: no config read, no clock.
 export function applyTimeoutPolicy(timeoutSeconds: unknown, categoryFloorMinutes: number | null): number {
+  // There is ALWAYS a floor. An earlier version fell back to null here, which
+  // moved the same bug one level up: autonomy-config.json is gitignored, so on
+  // an install that never added timeout_minutes -- e.g. an agent still running
+  // the old CLAUDE.md on someone else's laptop -- the caller's 3600 would win
+  // again and the hour would survive. The default is a FLOOR, not a fallback.
+  // Level 3 categories are unaffected in practice: they do not ask for
+  // approval at all, and a longer window costs nothing if one ever does.
   const floor = categoryFloorMinutes != null && categoryFloorMinutes > 0
     ? categoryFloorMinutes * 60
-    : null
+    : DEFAULT_TIMEOUT_MINUTES * 60
   const requested = typeof timeoutSeconds === 'number' && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
     ? Math.floor(timeoutSeconds)
-    : null
-  const seconds = requested ?? floor ?? DEFAULT_TIMEOUT_MINUTES * 60
-  return Math.min(floor != null ? Math.max(seconds, floor) : seconds, MAX_TIMEOUT_SECONDS)
+    : floor
+  return Math.min(Math.max(requested, floor), MAX_TIMEOUT_SECONDS)
 }
 
 // Pure + exported for tests. `timeoutSeconds` is the request-body value as

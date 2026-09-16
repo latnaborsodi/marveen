@@ -50,8 +50,15 @@ function approval(over: Partial<Approval> = {}): Approval {
 describe('computeTimeoutAt (leg 3: the timeout state must be reachable)', () => {
   const now = Math.floor(NOW_MS / 1000)
 
-  it('the request timeout_seconds wins', () => {
-    expect(computeTimeoutAt('nonexistent-category', 3600, NOW_MS)).toBe(now + 3600)
+  // Flipped by APPROVALFLOOR916-B: a request SHORTER than the default no
+  // longer wins. This assertion used to read `toBe(now + 3600)`; the change of
+  // expectation IS the proof that the behaviour changed.
+  it('a request SHORTER than the default is raised to the default', () => {
+    expect(computeTimeoutAt('nonexistent-category', 3600, NOW_MS)).toBe(now + DEFAULT_TIMEOUT_MINUTES * 60)
+  })
+
+  it('a request LONGER than the default still wins', () => {
+    expect(computeTimeoutAt('nonexistent-category', 3 * 24 * 3600, NOW_MS)).toBe(now + 3 * 24 * 3600)
   })
 
   it('caps a timeout past a week (it would equal the old "never")', () => {
@@ -85,8 +92,11 @@ describe('applyTimeoutPolicy (the category value is a FLOOR, not a fallback)', (
     expect(applyTimeoutPolicy(3 * 24 * HOUR, TWELVE_HOURS_MIN)).toBe(3 * 24 * HOUR)
   })
 
-  it('no floor configured: the caller value stands, as before', () => {
-    expect(applyTimeoutPolicy(HOUR, null)).toBe(HOUR)
+  // Flipped by APPROVALFLOOR916-B. autonomy-config.json is gitignored, so an
+  // install without timeout_minutes is the COMMON case, not the exotic one --
+  // that is precisely where an old agent's hardcoded 3600 must not win.
+  it('no category floor: the DEFAULT is the floor, not a fallback', () => {
+    expect(applyTimeoutPolicy(HOUR, null)).toBe(DEFAULT_TIMEOUT_MINUTES * 60)
   })
 
   it('no floor and no caller value: the 24h default stands', () => {
@@ -103,9 +113,9 @@ describe('applyTimeoutPolicy (the category value is a FLOOR, not a fallback)', (
     }
   })
 
-  it('a zero or negative floor is treated as "no floor", not as an instant timeout', () => {
-    expect(applyTimeoutPolicy(HOUR, 0)).toBe(HOUR)
-    expect(applyTimeoutPolicy(HOUR, -60)).toBe(HOUR)
+  it('a zero or negative floor falls back to the DEFAULT floor, never to an instant timeout', () => {
+    expect(applyTimeoutPolicy(HOUR, 0)).toBe(DEFAULT_TIMEOUT_MINUTES * 60)
+    expect(applyTimeoutPolicy(HOUR, -60)).toBe(DEFAULT_TIMEOUT_MINUTES * 60)
   })
 
   it('the one-week cap still wins over a caller value AND over an absurd floor', () => {
@@ -162,8 +172,17 @@ describe('BUKAS-TESZT: a 3600-at kuldo regi agens is 24 orat kap', () => {
     expect(computeTimeoutAt('email_send', 3 * 24 * 3600, NOW_MS, configPath) - now).toBe(3 * 24 * 3600)
   })
 
-  it('also korlat nelkuli kategorianal a regi viselkedes marad', () => {
-    expect(computeTimeoutAt('kanban_archive_done', 3600, NOW_MS, configPath) - now).toBe(3600)
+  // Flipped by APPROVALFLOOR916-B: a category with no timeout_minutes is not a
+  // hole any more. This is the case Milan's laptop is in today.
+  it('also korlat nelkuli kategoria is a 24 oras alapertelmezest kapja', () => {
+    expect(computeTimeoutAt('kanban_archive_done', 3600, NOW_MS, configPath) - now)
+      .toBe(DEFAULT_TIMEOUT_MINUTES * 60)
+  })
+
+  it('BUKAS-TESZT MASODIK FELE: config NELKUL is 24 ora jon ki', () => {
+    const at = computeTimeoutAt('email_send', 3600, NOW_MS, join(dir, 'nincs-ilyen-fajl.json'))
+    expect(at - now).toBe(DEFAULT_TIMEOUT_MINUTES * 60)
+    expect(at - now).not.toBe(3600)
   })
 })
 
