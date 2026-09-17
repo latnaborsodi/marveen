@@ -9,12 +9,15 @@
 //       'timeout' status was structurally unreachable.
 // These tests pin the fix for all three legs: the pure pieces behaviorally,
 // the wiring as string contracts (house idiom of approvals-prompt-contract).
-import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  applyTimeoutPolicy,
   computeTimeoutAt,
+  readCategoryTimeoutMinutes,
   buildOwnerApprovalText,
   DEFAULT_TIMEOUT_MINUTES,
   MAX_TIMEOUT_SECONDS,
@@ -47,8 +50,15 @@ function approval(over: Partial<Approval> = {}): Approval {
 describe('computeTimeoutAt (leg 3: the timeout state must be reachable)', () => {
   const now = Math.floor(NOW_MS / 1000)
 
-  it('the request timeout_seconds wins', () => {
-    expect(computeTimeoutAt('nonexistent-category', 3600, NOW_MS)).toBe(now + 3600)
+  // Flipped by APPROVALFLOOR916-B: a request SHORTER than the default no
+  // longer wins. This assertion used to read `toBe(now + 3600)`; the change of
+  // expectation IS the proof that the behaviour changed.
+  it('a request SHORTER than the default is raised to the default', () => {
+    expect(computeTimeoutAt('nonexistent-category', 3600, NOW_MS)).toBe(now + DEFAULT_TIMEOUT_MINUTES * 60)
+  })
+
+  it('a request LONGER than the default still wins', () => {
+    expect(computeTimeoutAt('nonexistent-category', 3 * 24 * 3600, NOW_MS)).toBe(now + 3 * 24 * 3600)
   })
 
   it('caps a timeout past a week (it would equal the old "never")', () => {
@@ -63,6 +73,127 @@ describe('computeTimeoutAt (leg 3: the timeout state must be reachable)', () => 
 
   it('NEVER returns null: with no param and no category value the default applies', () => {
     expect(computeTimeoutAt('nonexistent-category', undefined, NOW_MS)).toBe(now + DEFAULT_TIMEOUT_MINUTES * 60)
+  })
+})
+
+// APPROVALFLOOR916: the category deadline was a fallback the caller could
+// silently undercut. Every scaffolded agent sent `"timeout_seconds":3600`, so
+// raising a category's deadline in autonomy-config.json changed nothing -- the
+// hardcoded hour won. These pin the floor semantics.
+describe('applyTimeoutPolicy (the category value is a FLOOR, not a fallback)', () => {
+  const HOUR = 3600
+  const TWELVE_HOURS_MIN = 720
+
+  it('a caller asking for LESS than the category floor gets the floor', () => {
+    expect(applyTimeoutPolicy(HOUR, TWELVE_HOURS_MIN)).toBe(TWELVE_HOURS_MIN * 60)
+  })
+
+  it('a caller asking for MORE than the floor keeps the longer value', () => {
+    expect(applyTimeoutPolicy(3 * 24 * HOUR, TWELVE_HOURS_MIN)).toBe(3 * 24 * HOUR)
+  })
+
+  // Flipped by APPROVALFLOOR916-B. autonomy-config.json is gitignored, so an
+  // install without timeout_minutes is the COMMON case, not the exotic one --
+  // that is precisely where an old agent's hardcoded 3600 must not win.
+  it('no category floor: the DEFAULT is the floor, not a fallback', () => {
+    expect(applyTimeoutPolicy(HOUR, null)).toBe(DEFAULT_TIMEOUT_MINUTES * 60)
+  })
+
+  it('no floor and no caller value: the 24h default stands', () => {
+    expect(applyTimeoutPolicy(undefined, null)).toBe(DEFAULT_TIMEOUT_MINUTES * 60)
+  })
+
+  it('a floor with no caller value applies the floor', () => {
+    expect(applyTimeoutPolicy(undefined, TWELVE_HOURS_MIN)).toBe(TWELVE_HOURS_MIN * 60)
+  })
+
+  it('junk from the caller cannot undercut the floor either', () => {
+    for (const junk of ['3600', -5, 0, NaN, Infinity, null, undefined, {}]) {
+      expect(applyTimeoutPolicy(junk, TWELVE_HOURS_MIN)).toBe(TWELVE_HOURS_MIN * 60)
+    }
+  })
+
+  it('a zero or negative floor falls back to the DEFAULT floor, never to an instant timeout', () => {
+    expect(applyTimeoutPolicy(HOUR, 0)).toBe(DEFAULT_TIMEOUT_MINUTES * 60)
+    expect(applyTimeoutPolicy(HOUR, -60)).toBe(DEFAULT_TIMEOUT_MINUTES * 60)
+  })
+
+  it('the one-week cap still wins over a caller value AND over an absurd floor', () => {
+    expect(applyTimeoutPolicy(10 * 24 * HOUR, TWELVE_HOURS_MIN)).toBe(MAX_TIMEOUT_SECONDS)
+    expect(applyTimeoutPolicy(undefined, 30 * 24 * 60)).toBe(MAX_TIMEOUT_SECONDS)
+  })
+
+  it('NEVER returns a non-positive span: the timeout state stays reachable', () => {
+    for (const floor of [null, 0, -1, TWELVE_HOURS_MIN]) {
+      for (const req of [undefined, 0, -5, HOUR]) {
+        expect(applyTimeoutPolicy(req, floor)).toBeGreaterThan(0)
+      }
+    }
+  })
+})
+
+// APPROVALFLOOR916 -- BUKAS-TESZT. Donat kikotese: uj kapuhoz kotelezo egy
+// probat irni, ami SZANDEKOSAN meg tud bukni. Ez az: egy agens ugy kuld
+// `timeout_seconds: 3600`-at, ahogy a regi sablon tanitotta, es a proba csak
+// akkor zold, ha a keletkezo hatarido 24 ora mulva van, nem egy ora mulva.
+// A config-olvasast is atfogja, nem csak a tiszta fuggvenyt, kulonben az also
+// korlat bekerulhetne a politikaba ugy, hogy a valodi hivasi utvonal nem hasznalja.
+describe('BUKAS-TESZT: a 3600-at kuldo regi agens is 24 orat kap', () => {
+  const now = Math.floor(NOW_MS / 1000)
+  let dir: string
+  let configPath: string
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'approval-floor-'))
+    configPath = join(dir, 'autonomy-config.json')
+    writeFileSync(configPath, JSON.stringify({
+      categories: [
+        { key: 'email_send', level: 2, timeout_minutes: 1440 },
+        { key: 'kanban_archive_done', level: 3 },
+      ],
+    }), 'utf-8')
+  })
+
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+
+  it('a fixture config timeout_minutes-e kiolvasodik', () => {
+    expect(readCategoryTimeoutMinutes('email_send', configPath)).toBe(1440)
+    expect(readCategoryTimeoutMinutes('kanban_archive_done', configPath)).toBeNull()
+    expect(readCategoryTimeoutMinutes('nincs-ilyen', configPath)).toBeNull()
+  })
+
+  it('MAGA A BUKAS-TESZT: timeout_seconds 3600 -> a hatarido 24 ora, nem egy', () => {
+    const at = computeTimeoutAt('email_send', 3600, NOW_MS, configPath)
+    expect(at - now).toBe(24 * 3600)
+    expect(at - now).not.toBe(3600)
+  })
+
+  it('a hosszabb keres tovabbra is atmegy, az also korlat nem plafon', () => {
+    expect(computeTimeoutAt('email_send', 3 * 24 * 3600, NOW_MS, configPath) - now).toBe(3 * 24 * 3600)
+  })
+
+  // Flipped by APPROVALFLOOR916-B: a category with no timeout_minutes is not a
+  // hole any more. This is the case Milan's laptop is in today.
+  it('also korlat nelkuli kategoria is a 24 oras alapertelmezest kapja', () => {
+    expect(computeTimeoutAt('kanban_archive_done', 3600, NOW_MS, configPath) - now)
+      .toBe(DEFAULT_TIMEOUT_MINUTES * 60)
+  })
+
+  it('BUKAS-TESZT MASODIK FELE: config NELKUL is 24 ora jon ki', () => {
+    const at = computeTimeoutAt('email_send', 3600, NOW_MS, join(dir, 'nincs-ilyen-fajl.json'))
+    expect(at - now).toBe(DEFAULT_TIMEOUT_MINUTES * 60)
+    expect(at - now).not.toBe(3600)
+  })
+})
+
+// A masik fele Donat aggalyanak: az also korlat csak akkor er valamit, ha
+// EGYETLEN utvonal hoz letre jovahagyast. Ha valaki kesobb ir egy masodik
+// createApproval hivast, ez a teszt bukik, es nem kivulrol kell eszrevenni.
+describe('egyetlen hivasi utvonal hozhat letre jovahagyast', () => {
+  it('a createApproval-t csak a POST kezelo hivja, es az computeTimeoutAt-tel szamol', () => {
+    const calls = ROUTE.match(/createApproval\(/g) ?? []
+    expect(calls.length).toBe(1)
+    expect(ROUTE).toContain('const timeout_at = computeTimeoutAt(category, timeout_seconds)')
   })
 })
 

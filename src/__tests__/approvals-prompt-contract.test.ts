@@ -25,6 +25,21 @@ describe('agent-scaffold.ts buildAutonomyBody: approval wiring content', () => {
     expect(AUTONOMY_FN).toContain('## Autonómia és jóváhagyás')
   })
 
+  // APPROVALFLOOR916: the template used to hardcode `"timeout_seconds":3600`,
+  // which every generated CLAUDE.md then copied. Because the caller's value
+  // won, that one line made the category deadline in autonomy-config.json
+  // unable to protect anything. The deadline belongs to the config, not to the
+  // agent, so the template must not ship a number at all.
+  it('does NOT hardcode a timeout_seconds in the approval request', () => {
+    expect(AUTONOMY_FN).not.toContain('timeout_seconds":3600')
+    expect(AUTONOMY_FN).not.toMatch(/"timeout_seconds"\s*:\s*\d/)
+  })
+
+  it('tells the agent that the deadline comes from the config and is a floor', () => {
+    expect(AUTONOMY_FN).toContain('timeout_minutes')
+    expect(AUTONOMY_FN).toContain('ALSÓ KORLÁT')
+  })
+
   it('references autonomy-config.json so agents know where to read the level', () => {
     expect(AUTONOMY_FN).toContain('autonomy-config.json')
   })

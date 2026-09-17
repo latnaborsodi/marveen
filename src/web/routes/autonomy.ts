@@ -14,6 +14,12 @@ interface AutonomyCategory {
   level: number
   locked: boolean
   maxLevel: number
+  // APPROVALFLOOR916: the approval route reads this as the category's MINIMUM
+  // deadline. It is declared here only so a future refactor of this file
+  // cannot silently drop it: the POST below mutates the parsed object in
+  // place, so today the field survives a level change untouched, and the test
+  // pins that. An undeclared field is one rename away from disappearing.
+  timeout_minutes?: number | null
 }
 
 interface AutonomyConfig {

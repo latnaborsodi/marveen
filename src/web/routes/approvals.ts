@@ -26,10 +26,13 @@ export const DEFAULT_TIMEOUT_MINUTES = 1440
 // Cap: a timeout past a week is indistinguishable from the old "never".
 export const MAX_TIMEOUT_SECONDS = 7 * 24 * 3600
 
-function readCategoryTimeoutMinutes(category: string): number | null {
+// configPath is injectable ONLY so the failure test can point at a fixture:
+// the real store/autonomy-config.json is gitignored per-install, so a test
+// that read it would pass or fail depending on the machine.
+export function readCategoryTimeoutMinutes(category: string, configPath: string = AUTONOMY_CONFIG_PATH): number | null {
   try {
-    if (!existsSync(AUTONOMY_CONFIG_PATH)) return null
-    const config = JSON.parse(readFileSync(AUTONOMY_CONFIG_PATH, 'utf-8')) as {
+    if (!existsSync(configPath)) return null
+    const config = JSON.parse(readFileSync(configPath, 'utf-8')) as {
       categories: { key: string; timeout_minutes?: number | null }[]
     }
     const cat = config.categories.find(c => c.key === category)
@@ -40,17 +43,41 @@ function readCategoryTimeoutMinutes(category: string): number | null {
   }
 }
 
+// APPROVALFLOOR916: the category value used to be a mere FALLBACK -- the
+// caller's timeout_seconds won outright. That made the config unable to
+// protect anything: every scaffolded agent was told to send
+// `"timeout_seconds":3600`, so raising a category's deadline in
+// autonomy-config.json changed nothing while the hardcoded hour silently won.
+// A gate the caller overrides is not a gate. The category value is therefore a
+// FLOOR: a caller may ask for LONGER than the category requires, never shorter.
+// Pure + exported for tests: no config read, no clock.
+export function applyTimeoutPolicy(timeoutSeconds: unknown, categoryFloorMinutes: number | null): number {
+  // There is ALWAYS a floor. An earlier version fell back to null here, which
+  // moved the same bug one level up: autonomy-config.json is gitignored, so on
+  // an install that never added timeout_minutes -- e.g. an agent still running
+  // the old CLAUDE.md on someone else's laptop -- the caller's 3600 would win
+  // again and the hour would survive. The default is a FLOOR, not a fallback.
+  // Level 3 categories are unaffected in practice: they do not ask for
+  // approval at all, and a longer window costs nothing if one ever does.
+  const floor = categoryFloorMinutes != null && categoryFloorMinutes > 0
+    ? categoryFloorMinutes * 60
+    : DEFAULT_TIMEOUT_MINUTES * 60
+  const requested = typeof timeoutSeconds === 'number' && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
+    ? Math.floor(timeoutSeconds)
+    : floor
+  return Math.min(Math.max(requested, floor), MAX_TIMEOUT_SECONDS)
+}
+
 // Pure + exported for tests. `timeoutSeconds` is the request-body value as
 // received (unknown): the scaffolded agent instructions have always told
 // agents to send timeout_seconds, but the old handler never read it.
-export function computeTimeoutAt(category: string, timeoutSeconds: unknown, nowMs: number = Date.now()): number {
-  const now = Math.floor(nowMs / 1000)
-  if (typeof timeoutSeconds === 'number' && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0) {
-    return now + Math.min(Math.floor(timeoutSeconds), MAX_TIMEOUT_SECONDS)
-  }
-  const catMinutes = readCategoryTimeoutMinutes(category)
-  if (catMinutes != null && catMinutes > 0) return now + catMinutes * 60
-  return now + DEFAULT_TIMEOUT_MINUTES * 60
+export function computeTimeoutAt(
+  category: string,
+  timeoutSeconds: unknown,
+  nowMs: number = Date.now(),
+  configPath: string = AUTONOMY_CONFIG_PATH,
+): number {
+  return Math.floor(nowMs / 1000) + applyTimeoutPolicy(timeoutSeconds, readCategoryTimeoutMinutes(category, configPath))
 }
 
 // Owner-facing Telegram text. Pure + exported for tests. Plain text (no
