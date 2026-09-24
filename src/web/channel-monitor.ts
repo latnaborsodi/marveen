@@ -1304,6 +1304,53 @@ const KEEPALIVE_RESPAWN_GRACE_MS = 15 * 60 * 1000 // let a respawned session re-
 const KEEPALIVE_LIVENESS_TRUST_CEILING_MS = 45 * 60 * 1000
 let marveenLastKeepaliveRespawn = 0
 
+// BUSY-DEFER HARD CAP (tebez #126, 2026-09-24): the busy-guard below had no
+// upper bound of its own. While the main pane keeps reading 'busy'/'typing' the
+// respawn was deferred on EVERY sweep, forever -- and a wedged Claude TUI reads
+// exactly like a pane that is working. Measured twice on jezus-channels:
+//   * 2026-09-17 17:07 -> 09-18 06:51: 13h43m silent, 2612 consecutive
+//     'Keepalive stale but pane is busy -- deferring respawn' lines;
+//   * 2026-09-22 12:36 -> 09-23 09:51: 21h, 1297 lines, and this one did real
+//     damage -- the morning rad-var digest, the kanban audit, the dream-engine,
+//     the tebez daily triage and the invoice-forward run all silently missed.
+//     It did not self-heal; a MANUAL channel restore ended it.
+// A pane that has been busy for a quarter of an hour while the keepalive stays
+// stale is not working, it is wedged. Past this cap the respawn runs anyway,
+// busy pane or not. Deliberately the SAME 15 minutes as
+// STUCK_RESTART_HARD_CAP_MS, so both watchdog arms give up at the same age
+// (the stuck-input arm got its cap in 7b156ec; this one is the twin).
+// NOT to be confused with KEEPALIVE_LIVENESS_TRUST_CEILING_MS above: that one
+// bounds how long we believe a LIVE POLLER, this one bounds how long we wait on
+// a BUSY PANE.
+// The cap is measured in ELAPSED TIME, never in deferral COUNT -- the number of
+// log lines only reflects the sweep cadence, the wall-clock gap is the harm.
+export const KEEPALIVE_BUSY_DEFER_CAP_MS = 15 * 60 * 1000
+// Start of the CURRENT uninterrupted busy-defer streak (null = not deferring).
+// Reset whenever the keepalive is no longer stale, whenever the pane stops
+// reading busy, and after a respawn -- so only a continuous stretch of
+// "stale keepalive + busy pane" accumulates toward the cap.
+let keepaliveBusyDeferSince: number | null = null
+
+/**
+ * Pure decision: should the keepalive respawn STILL be deferred for a busy pane?
+ *
+ * Defers only while BOTH hold: the pane reads busy/typing
+ * (shouldDeferKeepaliveRespawn) AND the current uninterrupted defer streak is
+ * still younger than the cap. Once the streak reaches capMs the answer is
+ * false -- respawn the busy pane, because at that age "busy" means wedged.
+ *
+ * deferredForMs is 0 on the first sweep of a streak, so a healthy busy pane is
+ * still spared for the full cap window.
+ */
+export function shouldDeferKeepaliveRespawnWithCap(opts: {
+  paneState: PaneState | null
+  deferredForMs: number
+  capMs: number
+}): boolean {
+  if (!shouldDeferKeepaliveRespawn(opts.paneState)) return false
+  return opts.deferredForMs < opts.capMs
+}
+
 /**
  * Pure decision: should the keepalive respawn be deferred because the
  * main session pane is actively busy?
@@ -1398,7 +1445,10 @@ function refreshKeepaliveFromInbound(): void {
   }
 }
 
-function checkMainKeepaliveStaleness(): void {
+// Exported for the busy-defer cap failure test (tebez #126): the cap has to be
+// provable on the REAL path -- "a respawn-pane actually ran" -- not just on the
+// pure decider, so the test drives this function end to end with tmux mocked.
+export function checkMainKeepaliveStaleness(): void {
   // SAFETY NET first: let any fresh inbound traffic warm the file before we
   // judge staleness, so a busy-but-alive session is never seen as stale-deaf.
   refreshKeepaliveFromInbound()
@@ -1425,6 +1475,7 @@ function checkMainKeepaliveStaleness(): void {
         try { livenessAgeMs = Date.now() - statSync(KEEPALIVE_FILE).mtimeMs } catch { livenessAgeMs = null }
         if (shouldTrustLivePollerOverStaleness({ keepaliveAgeMs: livenessAgeMs, trustCeilingMs: KEEPALIVE_LIVENESS_TRUST_CEILING_MS })) {
           logger.debug({ claudePid, provider: provider.type, livenessAgeMs }, 'Keepalive stale but channel plugin is alive and within trust ceiling -- skipping respawn')
+          keepaliveBusyDeferSince = null // not a busy-defer sweep: the streak restarts from scratch
           return
         }
         logger.warn({ claudePid, provider: provider.type, livenessAgeMs }, 'Keepalive stale beyond liveness-trust ceiling despite a live poller -- treating as possible deafness, not skipping')
@@ -1452,7 +1503,11 @@ function checkMainKeepaliveStaleness(): void {
     msSinceLastRespawn,
     respawnGraceMs: KEEPALIVE_RESPAWN_GRACE_MS,
   })
-  if (!respawn) return
+  if (!respawn) {
+    // Healthy again (or inside the respawn grace): the defer streak is over.
+    keepaliveBusyDeferSince = null
+    return
+  }
   // Busy-guard: do not respawn a pane that is actively processing a turn.
   // capturePane returns null if the pane can't be read; detectPaneState
   // returns 'unknown' for null input — shouldDeferKeepaliveRespawn is
@@ -1460,12 +1515,25 @@ function checkMainKeepaliveStaleness(): void {
   const paneContent = capturePane(MAIN_CHANNELS_SESSION)
   const paneState = paneContent != null ? detectPaneState(paneContent) : null
   if (shouldDeferKeepaliveRespawn(paneState)) {
-    logger.info({ paneState }, 'Keepalive stale but pane is busy -- deferring respawn')
+    if (keepaliveBusyDeferSince == null) keepaliveBusyDeferSince = now
+  } else {
+    keepaliveBusyDeferSince = null
+  }
+  const busyDeferredForMs = keepaliveBusyDeferSince != null ? now - keepaliveBusyDeferSince : 0
+  if (shouldDeferKeepaliveRespawnWithCap({ paneState, deferredForMs: busyDeferredForMs, capMs: KEEPALIVE_BUSY_DEFER_CAP_MS })) {
+    logger.info({ paneState, busyDeferredForMs, capMs: KEEPALIVE_BUSY_DEFER_CAP_MS }, 'Keepalive stale but pane is busy -- deferring respawn')
     return
+  }
+  if (keepaliveBusyDeferSince != null) {
+    logger.warn(
+      { paneState, busyDeferredForMs, capMs: KEEPALIVE_BUSY_DEFER_CAP_MS },
+      'Keepalive busy-defer hard cap reached -- pane still reads busy but the channel has been stale too long, respawning anyway',
+    )
   }
   const ageMin = Math.round((ageMs ?? 0) / 60000)
   logger.warn({ ageMs, paneState }, 'Channel keep-alive stale -- main session likely wedged/deaf, respawning via respawn-pane')
   sendAlert(`⚠️ A fő channel keep-alive ${ageMin} perce nem frissült -- respawn-pane a ${MAIN_CHANNELS_SESSION} session-on (a beszelgetes elveszik, memoria marad).`)
+  keepaliveBusyDeferSince = null // streak closed: either we respawn now, or the next sweep starts fresh
   if (respawnMarveenSessionFresh()) {
     marveenLastKeepaliveRespawn = now
     // Suppress the process-down handler during the respawn window (reuses the
