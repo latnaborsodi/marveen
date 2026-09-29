@@ -1,0 +1,33 @@
+{
+  "id": "marketer-isolated",
+  "label": "Marketinges (izolált)",
+  "description": "Mint a marketer profil, de a Bash olvasás (ls/cat) a saját agent-mappájára szűkítve, a tebez repó explicit deny, és a dashboard API teljesen zárva. Erősen injection-kitett ügynökökhöz.",
+  "permissionMode": "strict",
+  "filesystem": {
+    "allow": [
+      "Read(${AGENT_DIR}/**)",
+      "Write(${AGENT_DIR}/**)",
+      "Edit(${AGENT_DIR}/**)",
+      "Read(${HOME}/Downloads/**)",
+      "Bash(ls ${AGENT_DIR})",
+      "Bash(ls ${AGENT_DIR}/:*)",
+      "Bash(cat ${AGENT_DIR}/:*)",
+      "WebFetch(*)",
+      "WebSearch(*)"
+    ],
+    "deny": [
+      "Read(${HOME}/.ssh/**)",
+      "Read(${HOME}/.aws/**)",
+      "Read(${HOME}/.gnupg/**)",
+      "Read(${HOME}/.env)",
+      "Read(**/.env)",
+      "Read(${HOME}/tebez/**)",
+      "Bash(cat ${HOME}/tebez:*)",
+      "Bash(ls ${HOME}/tebez:*)",
+      "Bash(cd ${HOME}/tebez:*)",
+      "Bash(sudo:*)",
+      "Bash(rm:*)",
+      "Bash(curl -X POST:*)"
+    ]
+  }
+}
