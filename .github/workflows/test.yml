@@ -47,3 +47,42 @@ jobs:
       # regression guard that only runs manually rots exactly like a one-shot
       # seed. Runs natively here (ubuntu = the Linux branch it asserts).
       - run: bash scripts/__tests__/stop-start-system-unit.test.sh
+      # PYGATES930: six tracked python guards lived under scripts/__tests__/
+      # and NOTHING ran them -- the exact rot the comment above names, one
+      # step further along. (A seventh, kinai-approval-reminder.test.py, still
+      # exists only on the running tree and is out of scope here; it gets
+      # picked up by this same glob the moment it is committed.) Wired here only AFTER isolating usage-collect's token
+      # test: it read the HOST's real ~/.claude/.credentials.json and printed
+      # the token in the assertion diff. This repo is PUBLIC, so wiring the
+      # step up first would have turned a dormant test into a credential leak
+      # on the first red run.
+      #
+      # The loop keeps its own failure flag on purpose, and both reasons were
+      # measured rather than assumed. Under the runner's default `bash -e` a
+      # bare `for ... do python3 "$t"; done` DOES fail, but it aborts on the
+      # first red file: measured with a deliberately failing fixture sorted
+      # first, only that one file of the seven in the run executed, so one
+      # break hides the state of every guard behind it. Without -e (any future `shell:` override)
+      # the same loop exits with the status of the LAST file only -- measured
+      # exit 0 with a deliberately failing fixture first in the glob, a gate
+      # that cannot fail. The flag gives both: every file runs, every failure
+      # is named, the step still exits non-zero.
+      #
+      # The empty-glob branch fails too: a guard step that matches no files is
+      # indistinguishable from a green one.
+      - name: Python guards under scripts/__tests__
+        run: |
+          shopt -s nullglob
+          tests=(scripts/__tests__/*.test.py)
+          if [ ${#tests[@]} -eq 0 ]; then
+            echo "No python guards matched -- the glob or the directory moved." >&2
+            exit 1
+          fi
+          failed=0
+          for t in "${tests[@]}"; do
+            echo "::group::$t"
+            python3 "$t" || { failed=1; echo "FAILED: $t" >&2; }
+            echo "::endgroup::"
+          done
+          echo "Ran ${#tests[@]} python guard file(s)."
+          exit "$failed"
