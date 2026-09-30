@@ -74,6 +74,31 @@ class TestClassify(unittest.TestCase):
         result = self._call("Read", {"file_path": f"{home}/.claude/skills/fleet-helper/references/extra.md"})
         self.assertIsNone(result)
 
+    def test_read_project_local_skill_md_returns_skill_read(self):
+        # The nine skills under <install>/.claude/skills were invisible to the
+        # Read branch while the pattern was anchored to ~ (measured 2026-09-29).
+        path = "/home/donat/marveen/.claude/skills/tebez-pr-review/SKILL.md"
+        result = self._call("Read", {"file_path": path})
+        self.assertEqual(result, ("tebez-pr-review", "skill_read"))
+
+    def test_read_agent_local_skill_md_returns_skill_read(self):
+        path = "/home/donat/.jezus-worker/.claude/skills/handoff/SKILL.md"
+        result = self._call("Read", {"file_path": path})
+        self.assertEqual(result, ("handoff", "skill_read"))
+
+    def test_read_claude_config_skill_md_returns_skill_read(self):
+        # .claude-config/skills is a symlink onto the global tree, so a read
+        # through it is the same skill and must land under the same name.
+        path = "/home/donat/marveen/.claude-config/skills/fleet-helper/SKILL.md"
+        result = self._call("Read", {"file_path": path})
+        self.assertEqual(result, ("fleet-helper", "skill_read"))
+
+    def test_read_skills_dir_outside_claude_returns_none(self):
+        # Guard against the widened pattern matching any "skills/" directory:
+        # only a .claude (or .claude-config) parent counts.
+        result = self._call("Read", {"file_path": "/home/donat/docs/skills/foo/SKILL.md"})
+        self.assertIsNone(result)
+
     def test_read_arbitrary_file_returns_none(self):
         result = self._call("Read", {"file_path": "/some/other/file.md"})
         self.assertIsNone(result)
