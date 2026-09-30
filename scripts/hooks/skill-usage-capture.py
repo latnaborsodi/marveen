@@ -67,9 +67,22 @@ def _dashboard_token() -> str:
 _agent_id_from_cwd = ledger_lib.agent_id_from_cwd
 
 
-# ~/.claude/skills/<name>/SKILL.md  (expand ~ for the running user)
+# Any `.claude/skills/<name>/SKILL.md` -- NOT just the global one under ~.
+#
+# The original pattern was anchored to os.path.expanduser("~"), so it only ever
+# saw the fleet-wide ~/.claude/skills tree. Measured 2026-09-29: the nine
+# project-local skills under /home/donat/marveen/.claude/skills were invisible
+# to the Read branch, while the Skill tool branch recorded all of them -- so a
+# project-local skill that gets READ (the common case for a skill the model
+# opens itself) produced no skill_usage row at all. Each agent has its own
+# .claude/skills too, and `.claude-config/skills` is a symlink onto the global
+# tree, so all three spellings must land in the table under the same name.
+#
+# A path ending in `.claude/skills/<name>/SKILL.md` IS a skill read by
+# definition, so matching it anywhere in the tree is the correct scope, not a
+# loosening: the only thing the old `~` anchor bought was a blind spot.
 _SKILL_MD_RE = re.compile(
-    r"^" + re.escape(os.path.expanduser("~")) + r"/\.claude/skills/([^/]+)/SKILL\.md$"
+    r"^(?:.*/)?\.claude(?:-config)?/skills/([^/]+)/SKILL\.md$"
 )
 
 
