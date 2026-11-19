@@ -9,6 +9,7 @@ synthetic snapshots -- no real network calls, no real ~/.codex or
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -808,6 +809,68 @@ class TestClaudeTokenSources(unittest.TestCase):
         self._tmp.write("CLAUDE_CODE_OAUTH_TOKEN=env-tok\n")
         self._tmp.close()
         self.addCleanup(os.unlink, self._tmp.name)
+        self._isolate_home()
+
+    def _isolate_home(self):
+        """Point every `~` expansion inside usage-collect at a fixture HOME.
+
+        PYGATES930: without this, a test that patched os.path.exists to True
+        left `open(os.path.expanduser("~/.claude/.credentials.json"))` pointed
+        at the HOST's real credentials file, so the token comparison below ran
+        against a live OAuth token -- and printed it in the failure diff. This
+        repo is public and this file is wired into CI, so the isolation is the
+        safety property, not a convenience.
+        """
+        self._home = tempfile.mkdtemp(prefix="usage-collect-home-")
+        self.addCleanup(shutil.rmtree, self._home, True)
+        real_expanduser = os.path.expanduser
+
+        def fake_expanduser(path):
+            if path == "~":
+                return self._home
+            if path.startswith("~/"):
+                return os.path.join(self._home, path[2:])
+            return real_expanduser(path)
+
+        patcher = patch.object(uc.os.path, "expanduser", side_effect=fake_expanduser)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_credentials(self, body):
+        """Create a credentials file inside the fixture HOME and return its path."""
+        path = os.path.join(self._home, ".claude", ".credentials.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        return path
+
+    def _assert_token(self, token, expected, source, expected_source):
+        """Compare tokens WITHOUT putting either value in the failure message.
+
+        assertEqual prints both sides on failure. One of those sides can be a
+        real credential read off the host, and a failing CI run on a public
+        repo writes that message to a world-readable log. The source name
+        ("keychain" / "env_file" / "credentials_file") is not a secret, so a
+        failure still says which branch won.
+        """
+        self.assertEqual(source, expected_source)
+        self.assertTrue(
+            token == expected,
+            "token mismatch (values withheld on purpose): "
+            "source={!r}, expected_len={}, got_len={}".format(
+                source, len(expected), "None" if token is None else len(token)
+            ),
+        )
+
+    def test_isolation_never_reaches_the_real_home(self):
+        """The isolation contract itself, asserted. If this fails, the token
+        tests below are reading the host instead of the fixture -- which is
+        the exact defect PYGATES930 fixed."""
+        self.assertTrue(uc.os.path.expanduser("~").startswith(self._home))
+        self.assertNotEqual(uc.os.path.expanduser("~"), os.environ.get("HOME"))
+        self.assertFalse(
+            os.path.exists(uc.os.path.expanduser("~/.claude/.credentials.json"))
+        )
 
     def _security_ok(self, stdout=None):
         return MagicMock(returncode=0, stdout=stdout if stdout is not None else self.KEYCHAIN_PAYLOAD)
@@ -818,18 +881,23 @@ class TestClaudeTokenSources(unittest.TestCase):
              patch.object(uc, "ENV_PATH", self._tmp.name), \
              patch.object(uc.subprocess, "run", return_value=self._security_ok()):
             token, source = uc._read_claude_token()
-        self.assertEqual(token, "keychain-tok")
-        self.assertEqual(source, "keychain")
+        self._assert_token(token, "keychain-tok", source, "keychain")
 
     def test_keychain_beats_env_file(self):
-        """The .env token answers 403, so it must never win over the keychain."""
+        """The .env token answers 403, so it must never win over the keychain --
+        not even when a credentials file is present but yields no usable token.
+
+        Both competing sources really exist on disk here (fixture credentials
+        file, fixture .env), so os.path.exists is left unpatched. The previous
+        version forced exists->True for EVERY path without redirecting
+        expanduser, which sent the read at the host's real credentials file.
+        """
+        self._write_credentials("{ this is not json")
         with patch.object(uc.sys, "platform", "darwin"), \
-             patch.object(uc.os.path, "exists", return_value=True), \
              patch.object(uc, "ENV_PATH", self._tmp.name), \
              patch.object(uc.subprocess, "run", return_value=self._security_ok()):
             token, source = uc._read_claude_token()
-        self.assertEqual(token, "keychain-tok")
-        self.assertEqual(source, "keychain")
+        self._assert_token(token, "keychain-tok", source, "keychain")
 
     def test_credentials_file_still_wins_over_keychain(self):
         cred = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
@@ -840,8 +908,7 @@ class TestClaudeTokenSources(unittest.TestCase):
              patch.object(uc.os.path, "expanduser", return_value=cred.name), \
              patch.object(uc.subprocess, "run", return_value=self._security_ok()) as run:
             token, source = uc._read_claude_token()
-        self.assertEqual(token, "file-tok")
-        self.assertEqual(source, "credentials_file")
+        self._assert_token(token, "file-tok", source, "credentials_file")
         run.assert_not_called()
 
     def test_non_darwin_never_shells_out_to_security(self):
@@ -856,8 +923,7 @@ class TestClaudeTokenSources(unittest.TestCase):
              patch.object(uc, "ENV_PATH", self._tmp.name), \
              patch.object(uc.subprocess, "run", return_value=MagicMock(returncode=1, stdout="")):
             token, source = uc._read_claude_token()
-        self.assertEqual(token, "env-tok")
-        self.assertEqual(source, "env_file")
+        self._assert_token(token, "env-tok", source, "env_file")
 
     def test_unparseable_keychain_payload_is_silent(self):
         with patch.object(uc.sys, "platform", "darwin"), \
@@ -875,6 +941,38 @@ class TestClaudeTokenSources(unittest.TestCase):
         with patch.object(uc.sys, "platform", "linux"), \
              patch.object(uc.os.path, "exists", return_value=False):
             self.assertEqual(uc._read_claude_token(), (None, None))
+
+
+class TestTokenAssertionWithholdsValues(unittest.TestCase):
+    """A guard on the guard. _assert_token exists so that a FAILING token
+    comparison cannot print a credential; that property is only worth
+    anything if it is asserted on the failing path, not the passing one."""
+
+    # Deliberately NOT shaped like a real token. The repo's secret-gate blocks
+    # vendor key shapes in committed content, and it is right to: a fixture
+    # that merely LOOKS like a credential would either need a path exemption
+    # (which would unblock the whole file -- this file, of all files) or a
+    # concatenation trick to slip past the gate. Neither is worth it; the
+    # property under test is "the value never appears in the message", and any
+    # unique string proves that.
+    SECRET = "FIXTURE-TOKEN-VALUE-THAT-MUST-NEVER-REACH-A-MESSAGE"
+
+    def test_failure_message_omits_both_token_values(self):
+        case = TestClaudeTokenSources("test_isolation_never_reaches_the_real_home")
+        with self.assertRaises(AssertionError) as caught:
+            case._assert_token(self.SECRET, "keychain-tok", "keychain", "keychain")
+        message = str(caught.exception)
+        self.assertNotIn(self.SECRET, message)
+        self.assertNotIn("keychain-tok", message)
+        # It must still be diagnosable: the branch that won is named.
+        self.assertIn("keychain", message)
+
+    def test_plain_assert_equal_would_have_leaked(self):
+        """The control: this is what the old assertion did. Kept as a test so
+        the reason for the helper cannot be read as cosmetic."""
+        with self.assertRaises(AssertionError) as caught:
+            unittest.TestCase().assertEqual(self.SECRET, "keychain-tok")
+        self.assertIn(self.SECRET, str(caught.exception))
 
 
 if __name__ == "__main__":
